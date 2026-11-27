@@ -660,3 +660,317 @@ fn a_record_in_the_way_is_a_conflict_at_once() {
         q("DELETE FROM pyo.users WHERE id = $1").bind(&usr).execute(&db).await.unwrap();
     });
 }
+
+// ── Traffic paths, against a throwaway Postgres ────────────────────────────
+
+/// What a heartbeat reply says about a cluster's traffic: publicTraffic,
+/// publicPorts, tailnetWeb, the tunnel connector, and freeDomainAddress.
+async fn reply_of(db: &sqlx::PgPool, cluster: &str) -> Value {
+    let public: bool = sqlx::query_scalar("SELECT public_traffic FROM pyo.clusters WHERE id = $1")
+        .bind(cluster)
+        .fetch_one(db)
+        .await
+        .unwrap();
+    let (ports, tailnet): (bool, bool) = sqlx::query_as(crate::traffic_paths::REPLY_PORTS)
+        .bind(cluster)
+        .fetch_one(db)
+        .await
+        .unwrap();
+    let tunnel = crate::agent::tunnel_wanted(db, cluster).await.unwrap();
+    let mut tx = db.begin().await.unwrap();
+    let address = crate::freedomain::load(&mut tx, cluster).await.unwrap().map(|(_, c)| c.mode().as_str());
+    tx.commit().await.unwrap();
+    json!({ "publicTraffic": public, "publicPorts": ports, "tailnetWeb": tailnet, "tunnel": tunnel, "freeDomainAddress": address })
+}
+
+/// The previous release's publicPorts (agent.rs before traffic paths).
+async fn old_ports(db: &sqlx::PgPool, cluster: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT c.traffic = 'public' OR (c.traffic = 'tunnel' AND coalesce(t.ports_public, true))
+           FROM pyo.clusters c LEFT JOIN pyo.cluster_tunnels t ON t.cluster_id = c.id WHERE c.id = $1",
+    )
+    .bind(cluster)
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+/// Against a throwaway Postgres: each of today's five traffic states gives
+/// the same heartbeat reply after the traffic paths migration as before,
+/// and maps to the switches of the design's table (§7.2). The previous
+/// release, still running beside it, reads the same publicPorts.
+#[test]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
+fn existing_clusters_keep_their_heartbeat_reply() {
+    run_big(async {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let run = crate::ids::random_string(8).to_lowercase();
+        let team = format!("team_tp{run}");
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&team).execute(&db).await.unwrap();
+        // (traffic, tunnel row with ports_public), then the switches
+        // (public, tunnel, tailnet) and TCP and UDP ports.
+        let states = [
+            ("public", None, (true, false, true), true),
+            ("public", Some(true), (true, true, true), true),
+            ("tailscale", None, (false, false, true), false),
+            ("tailscale", Some(true), (false, true, true), false),
+            ("tunnel", Some(true), (false, true, true), true),
+            ("tunnel", Some(false), (false, true, true), false),
+        ];
+        let mut before = vec![];
+        for (i, (traffic, tunnel, _, _)) in states.iter().enumerate() {
+            let cluster = format!("cl_tp{i}{run}");
+            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, traffic) VALUES ($1, $2, $1, $1, 'connected', $3)")
+                .bind(&cluster).bind(&team).bind(traffic).execute(&db).await.unwrap();
+            if let Some(ports) = tunnel {
+                q("INSERT INTO pyo.cluster_tunnels (cluster_id, team_id, account_id, tunnel_name, tunnel_id, state, ports_public) VALUES ($1, $2, 'acct', 'pyo', $3, 'ready', $4)")
+                    .bind(&cluster).bind(&team).bind(format!("tun{i}")).bind(ports).execute(&db).await.unwrap();
+            }
+            // As the previous release left it: no setting of its own.
+            q("UPDATE pyo.clusters SET public_ports = NULL, tailnet_web = true WHERE id = $1").bind(&cluster).execute(&db).await.unwrap();
+            let mut r = reply_of(&db, &cluster).await;
+            r["publicPorts"] = json!(old_ports(&db, &cluster).await);
+            before.push(r);
+        }
+        // The migration's data step.
+        let sql = include_str!("../../migrations/0047_traffic_paths.sql");
+        let step = sql.lines().skip_while(|l| !l.starts_with("UPDATE pyo.clusters c SET public_ports")).take(2).collect::<Vec<_>>().join("\n");
+        assert!(step.contains("FROM pyo.cluster_tunnels"), "{step}");
+        sqlx::query(&format!("{step} AND c.team_id = '{team}'")).execute(&db).await.unwrap();
+        for (i, (_, _, (public, tunnel, tailnet), ports)) in states.iter().enumerate() {
+            let cluster = format!("cl_tp{i}{run}");
+            let after = reply_of(&db, &cluster).await;
+            assert_eq!(after, before[i], "state {i}: the same reply");
+            assert_eq!(after["publicPorts"], json!(ports), "state {i}");
+            assert_eq!(old_ports(&db, &cluster).await, *ports, "state {i}: the previous release reads the same");
+            let (traffic, has_tunnel, tw): (String, bool, bool) = sqlx::query_as(
+                "SELECT c.traffic, EXISTS (SELECT 1 FROM pyo.cluster_tunnels t WHERE t.cluster_id = c.id AND t.state <> 'removing'), c.tailnet_web FROM pyo.clusters c WHERE c.id = $1",
+            )
+            .bind(&cluster)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert_eq!((traffic == "public", has_tunnel, tw), (*public, *tunnel, *tailnet), "state {i}: the switches");
+        }
+        // The previous release changes a tunnel's ports: the cluster follows,
+        // and the other way round.
+        let c = format!("cl_tp4{run}");
+        q("UPDATE pyo.cluster_tunnels SET ports_public = false WHERE cluster_id = $1").bind(&c).execute(&db).await.unwrap();
+        assert_eq!(reply_of(&db, &c).await["publicPorts"], json!(false));
+        q("UPDATE pyo.clusters SET public_ports = true WHERE id = $1").bind(&c).execute(&db).await.unwrap();
+        assert!(old_ports(&db, &c).await);
+        assert_eq!(reply_of(&db, &c).await["publicPorts"], json!(true));
+        q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
+    });
+}
+
+/// Against a throwaway Postgres and the fake Cloudflare: the Traffic
+/// card's switches through `setClusterPaths`. Turning a path off with
+/// domains on it asks first; the last path stays on; Tailnet off leaves
+/// tailnet domains out of the routes; Tunnel on moves nothing; Public off
+/// moves the domains in the account first and closes the ports only once
+/// they're on the tunnel; Tunnel off switches them back first, then
+/// removes the tunnel. The old ops keep doing what they did.
+#[test]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
+fn the_traffic_paths_end_to_end() {
+    secret_key();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("pyo_api::cloudflare=warn,pyo_api::error=error")
+        .with_test_writer()
+        .try_init();
+    run_big(async {
+        let _one = FAKE_API.lock().await;
+        let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
+        // SAFETY: set while FAKE_API is held; nothing else here reads it yet.
+        unsafe {
+            std::env::set_var("PYO_DEV_CLOUDFLARE_API", &cf.base);
+        }
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(db.clone(), crate::vault::Provider::from_env()));
+        let s = crate::rls::tests::state(db.clone());
+        let run = crate::ids::random_string(8).to_lowercase();
+        let id = |p: &str| format!("{p}_paths{run}");
+        let (team, cluster, project, svc, dpl) = (id("team"), id("cl"), id("prj"), id("svc"), id("dpl"));
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&team).execute(&db).await.unwrap();
+        let mut users = vec![];
+        for (who, role) in [("ada", "admin"), ("bob", "viewer")] {
+            let usr = id(&format!("usr{who}"));
+            let email = format!("{who}{run}@example.com");
+            q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, $3, 'x')")
+                .bind(&usr).bind(&email).bind(who).execute(&db).await.unwrap();
+            q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, $5, 'active')")
+                .bind(id(&format!("mem{who}"))).bind(&team).bind(&usr).bind(&email).bind(role).execute(&db).await.unwrap();
+            users.push(crate::auth::User {
+                id: usr,
+                name: who.into(),
+                email,
+                timezone: "UTC".into(),
+                is_admin: false,
+                must_set_up: false,
+                key: None,
+            });
+        }
+        let (admin, viewer) = (&users[0], &users[1]);
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at, traffic, capabilities)
+           VALUES ($1, $2, 'eu', $1, 'connected', now(), 'public', '{\"tunnel\": true, \"agentInstall\": {\"state\": \"current\"}, \"loadBalancerIps\": [\"203.0.113.10\"]}')")
+            .bind(&cluster).bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)").bind(&project).bind(&team).execute(&db).await.unwrap();
+        let (shop, other, private) = (format!("shop-{run}.example.com"), format!("old-{run}.other.org"), format!("blog-{run}.tail1234.ts.net"));
+        let domains = json!([
+            { "id": "dom_shop", "hostname": shop, "portName": "http", "tlsMode": "auto", "status": "active" },
+            { "id": "dom_other", "hostname": other, "portName": "http", "tlsMode": "auto", "status": "active" },
+            { "id": "dom_ts", "hostname": private, "portName": "http", "status": "active" },
+        ]);
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', jsonb_build_object('domains', $5::jsonb), 'running')")
+            .bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&domains).execute(&db).await.unwrap();
+        let service = pyo_proto::ServiceRef { service_id: svc.clone(), name: "web".into(), namespace: project.clone(), workload_kind: "Deployment".into() };
+        let spec = json!({ "service": service, "projectId": project, "ports": [{ "name": "http", "containerPort": 80, "protocol": "HTTP", "exposure": "http", "publicPort": null }] });
+        q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'running', '{}', $6)")
+            .bind(&dpl).bind(&team).bind(&project).bind(&svc).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
+        q("UPDATE pyo.services SET current_deployment_id = $2 WHERE id = $1").bind(&svc).bind(&dpl).execute(&db).await.unwrap();
+        let zones = json!([{ "id": ZONE, "name": "example.com", "canEdit": true, "accountId": ACCOUNT, "accountName": "Acme", "tunnel": { "ready": true } }]);
+        let sealed = crate::vault::get().seal_credential(&team, TOKEN).await.unwrap();
+        q("INSERT INTO pyo.cloudflare_accounts (team_id, token_sealed, zones) VALUES ($1, $2, $3)").bind(&team).bind(&sealed).bind(&zones).execute(&db).await.unwrap();
+        let paths = |body: Value| {
+            let mut b = body;
+            b["op"] = json!("setClusterPaths");
+            b["clusterId"] = json!(cluster);
+            b
+        };
+        let traffic = |db: sqlx::PgPool, c: String| async move {
+            sqlx::query_as::<_, (String, bool, bool, Option<bool>)>(
+                "SELECT traffic, tailnet_web, close_public_after IS NOT NULL, public_ports FROM pyo.clusters WHERE id = $1",
+            )
+            .bind(c)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        let agent_done = |db: sqlx::PgPool, cluster: String| async move {
+            sqlx::query("UPDATE pyo.commands SET status = 'done' WHERE cluster_id = $1").bind(cluster).execute(&db).await.unwrap();
+        };
+        let hosts_handed = |db: sqlx::PgPool, svc: String| async move {
+            let mut command = json!({ "kind": "sync_routes", "service": { "serviceId": svc } });
+            crate::routes::refresh(&db, &mut command).await.unwrap();
+            command["domains"].as_array().unwrap().iter().map(|d| d["hostname"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
+        };
+
+        // A viewer can't change them.
+        let e = crate::ops::run_json(&s, viewer, paths(json!({ "tailnet": false }))).await.unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::FORBIDDEN);
+
+        // Tailnet off: asked first, then its domains leave the routes.
+        let r = crate::ops::run_json(&s, admin, paths(json!({ "tailnet": false }))).await.unwrap();
+        assert_eq!(r["status"], "confirm");
+        assert_eq!(r["domains"], json!([{ "serviceId": svc, "service": "web", "domainId": "dom_ts", "hostname": private, "path": "tailnet", "outcome": "stops" }]));
+        assert!(traffic(db.clone(), cluster.clone()).await.1, "nothing changed yet");
+        assert_eq!(hosts_handed(db.clone(), svc.clone()).await.len(), 3);
+        let r = crate::ops::run_json(&s, admin, paths(json!({ "tailnet": false, "confirm": true }))).await.unwrap();
+        assert_eq!(r["status"], "done");
+        assert!(!traffic(db.clone(), cluster.clone()).await.1);
+        assert_eq!(hosts_handed(db.clone(), svc.clone()).await, [shop.clone(), other.clone()]);
+        assert!(commands(&db, &cluster).await.contains(&"sync_routes".to_owned()), "the routes follow now");
+        assert_eq!(reply_of(&db, &cluster).await["tailnetWeb"], json!(false));
+
+        // The last path stays on.
+        let e = crate::ops::run_json(&s, admin, paths(json!({ "public": false, "confirm": true }))).await.unwrap_err();
+        assert_eq!(e.message, crate::traffic_paths::ONE_PATH);
+        assert_eq!(traffic(db.clone(), cluster.clone()).await.0, "public");
+        // Back on: nothing to confirm.
+        let r = crate::ops::run_json(&s, admin, paths(json!({ "tailnet": true }))).await.unwrap();
+        assert_eq!(r["status"], "done");
+        assert_eq!(hosts_handed(db.clone(), svc.clone()).await.len(), 3);
+
+        // Tunnel on: the tunnel is made, no domain moves, public stays.
+        let r = crate::ops::run_json(&s, admin, paths(json!({ "tunnel": true }))).await.unwrap();
+        assert_eq!(r["status"], "done");
+        assert_eq!(traffic(db.clone(), cluster.clone()).await.0, "public");
+        assert!(domain(&db, &svc).await.get("tunnel").is_none(), "no domain moved");
+        let before = reply_of(&db, &cluster).await;
+        assert_eq!(before["publicPorts"], json!(true));
+
+        // Public off: the domain in the account moves, the other stops.
+        let r = crate::ops::run_json(&s, admin, paths(json!({ "public": false, "publicPorts": true }))).await.unwrap();
+        assert_eq!(r["status"], "confirm");
+        let listed: Vec<(&str, &str)> = r["domains"].as_array().unwrap().iter().map(|d| (d["hostname"].as_str().unwrap(), d["outcome"].as_str().unwrap())).collect();
+        assert_eq!(listed, [(shop.as_str(), "moves"), (other.as_str(), "stops")]);
+        assert_eq!(r["moving"], 1);
+        let r = crate::ops::run_json(&s, admin, paths(json!({ "public": false, "publicPorts": true, "confirm": true }))).await.unwrap();
+        assert_eq!(r["status"], "moving");
+        let (t, _, closing, ports) = traffic(db.clone(), cluster.clone()).await;
+        assert_eq!((t.as_str(), closing, ports), ("public", true, Some(true)), "the ports wait for the move");
+        assert_eq!(domain(&db, &svc).await["tunnel"], "switching");
+        // The switch still shows public ports on, closing.
+        let row: Value = sqlx::query_scalar("SELECT jsonb_build_object('traffic', traffic, 'tailnetWeb', tailnet_web) FROM pyo.clusters WHERE id = $1")
+            .bind(&cluster).fetch_one(&db).await.unwrap();
+        assert!(crate::traffic_paths::of_shown(&row).public);
+        // A pass: the tunnel and its routes, the record waits for the agent.
+        tunnel_loop::pass(&s).await.unwrap();
+        assert_eq!(traffic(db.clone(), cluster.clone()).await.0, "public", "still moving");
+        agent_done(db.clone(), cluster.clone()).await;
+        tunnel_loop::pass(&s).await.unwrap();
+        assert_eq!(domain(&db, &svc).await["tunnel"], "on");
+        let (t, _, closing, _) = traffic(db.clone(), cluster.clone()).await;
+        assert_eq!((t.as_str(), closing), ("tunnel", false), "closed once it's on the tunnel");
+        let now = reply_of(&db, &cluster).await;
+        assert_eq!((now["publicTraffic"].clone(), now["publicPorts"].clone()), (json!(false), json!(true)));
+
+        // Public on again: nothing listed, open at once.
+        let r = crate::ops::run_json(&s, admin, paths(json!({ "public": true }))).await.unwrap();
+        assert_eq!(r["status"], "done");
+        assert_eq!(traffic(db.clone(), cluster.clone()).await.0, "public");
+
+        // Tunnel off with public ports on: its domain switches back first,
+        // then the tunnel goes.
+        let r = crate::ops::run_json(&s, admin, paths(json!({ "tunnel": false }))).await.unwrap();
+        assert_eq!(r["status"], "confirm");
+        assert_eq!(r["domains"][0]["outcome"], "moves");
+        let r = crate::ops::run_json(&s, admin, paths(json!({ "tunnel": false, "confirm": true }))).await.unwrap();
+        assert_eq!(r["status"], "moving");
+        let state: (String, bool) = sqlx::query_as("SELECT state, remove_when_back IS NOT NULL FROM pyo.cluster_tunnels WHERE cluster_id = $1")
+            .bind(&cluster).fetch_one(&db).await.unwrap();
+        assert_eq!((state.0.as_str(), state.1), ("ready", true), "kept until its domains are back");
+        agent_done(db.clone(), cluster.clone()).await;
+        tunnel_loop::pass(&s).await.unwrap();
+        assert!(domain(&db, &svc).await.get("tunnel").is_none(), "back on public ports");
+        let state: String = sqlx::query_scalar("SELECT state FROM pyo.cluster_tunnels WHERE cluster_id = $1")
+            .bind(&cluster).fetch_one(&db).await.unwrap();
+        assert_eq!(state, "removing");
+        q("UPDATE pyo.cluster_tunnels SET agent_status = '{}' WHERE cluster_id = $1").bind(&cluster).execute(&db).await.unwrap();
+        tunnel_loop::pass(&s).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.cluster_tunnels WHERE cluster_id = $1").bind(&cluster).fetch_one(&db).await.unwrap();
+        assert_eq!(left, 0, "removed at Cloudflare");
+        assert!(cf.tunnels().iter().filter(|t| t["name"].as_str().is_some_and(|n| n.contains(&cluster))).all(|t| !t["deleted_at"].is_null()));
+
+        // The old ops: as before. Tunnel mode without TCP and UDP ports.
+        let r = crate::ops::run_json(&s, admin, json!({ "op": "setClusterTraffic", "clusterId": cluster, "mode": "tunnel", "portsPublic": false })).await.unwrap();
+        assert_eq!(r["traffic"], "tunnel");
+        assert_eq!(traffic(db.clone(), cluster.clone()).await.3, Some(false));
+        assert!(!old_ports(&db, &cluster).await);
+        assert_eq!(reply_of(&db, &cluster).await["publicPorts"], json!(false));
+        // Tailscale only: as before, no ports, the tunnel keeps running.
+        crate::ops::run_json(&s, admin, json!({ "op": "setClusterTraffic", "clusterId": cluster, "mode": "tailscale" })).await.unwrap();
+        let (t, _, _, ports) = traffic(db.clone(), cluster.clone()).await;
+        assert_eq!((t.as_str(), ports), ("tailscale", None));
+        assert_eq!(reply_of(&db, &cluster).await["publicPorts"], json!(false));
+        // removeClusterTunnel still refused in tunnel mode, allowed outside it.
+        crate::ops::run_json(&s, admin, json!({ "op": "setClusterPublicTraffic", "clusterId": cluster, "on": true })).await.unwrap();
+        assert_eq!(traffic(db.clone(), cluster.clone()).await.0, "public");
+        crate::ops::run_json(&s, admin, json!({ "op": "removeClusterTunnel", "clusterId": cluster })).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM pyo.cluster_tunnels WHERE cluster_id = $1")
+            .bind(&cluster).fetch_one(&db).await.unwrap();
+        assert_eq!(state, "removing");
+        q("UPDATE pyo.cluster_tunnels SET agent_status = '{}' WHERE cluster_id = $1").bind(&cluster).execute(&db).await.unwrap();
+        tunnel_loop::pass(&s).await.unwrap();
+        q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
+    });
+}

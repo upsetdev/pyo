@@ -757,16 +757,14 @@ async fn heartbeat(
     let public_dashboard = crate::publicdash::wanted_for(&s.db, same_cluster).await?;
     // The Cloudflare Tunnel connector it runs, if any.
     let tunnel = tunnel_wanted(&s.db, &cluster.id).await?;
-    // TCP and UDP ports on the servers: with public traffic, or in tunnel
-    // mode while the cluster keeps them.
-    let public_ports: bool = sqlx::query_scalar(
-        "SELECT c.traffic = 'public' OR (c.traffic = 'tunnel' AND coalesce(t.ports_public, true))
-           FROM pyo.clusters c LEFT JOIN pyo.cluster_tunnels t ON t.cluster_id = c.id WHERE c.id = $1",
-    )
-    .bind(&cluster.id)
-    .fetch_one(&s.db)
-    .await?;
-    let reply = json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability, "tailnet": tailnet, "publicDashboard": public_dashboard, "tunnel": tunnel, "publicPorts": public_ports });
+    // TCP and UDP ports on the servers: with public traffic, else as the
+    // cluster's setting says (before it had one: in tunnel mode while the
+    // tunnel keeps them). And whether websites answer on the tailnet.
+    let (public_ports, tailnet_web): (bool, bool) = sqlx::query_as(crate::traffic_paths::REPLY_PORTS)
+        .bind(&cluster.id)
+        .fetch_one(&s.db)
+        .await?;
+    let reply = json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability, "tailnet": tailnet, "publicDashboard": public_dashboard, "tunnel": tunnel, "publicPorts": public_ports, "tailnetWeb": tailnet_web });
     Ok(Json(signed_reply(&cluster.id, &headers, reply).await))
 }
 
@@ -774,7 +772,7 @@ async fn heartbeat(
 /// Cloudflare made it, none while it's removed or there's none (the agent
 /// then removes what it has). Left out while the tunnel is still being
 /// made.
-async fn tunnel_wanted(db: &sqlx::PgPool, cluster_id: &str) -> ApiResult<Option<pyo_proto::TunnelWanted>> {
+pub(crate) async fn tunnel_wanted(db: &sqlx::PgPool, cluster_id: &str) -> ApiResult<Option<pyo_proto::TunnelWanted>> {
     let row: Option<(Option<String>, String, bool)> = sqlx::query_as(
         "SELECT tunnel_id, state, ports_public FROM pyo.cluster_tunnels WHERE cluster_id = $1",
     )

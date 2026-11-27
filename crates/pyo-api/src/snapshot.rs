@@ -161,6 +161,12 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'publicTraffic', public_traffic,
             -- 'public', 'tailscale' or 'tunnel' (Cloudflare Tunnel).
             'traffic', traffic,
+            -- Traffic paths (traffic_paths.rs): the Tailnet switch, TCP and
+            -- UDP ports while public ports are off (null: as before), and
+            -- public ports waiting for domains to move to the tunnel.
+            'tailnetWeb', tailnet_web,
+            'publicPortsSet', public_ports,
+            'closingPublic', close_public_after IS NOT NULL,
             -- 'public' or 'tailscale' as chosen; freeDomainAddress below
             -- is the one in use (freedomain.rs).
             'freeDomainAddressSet', free_domain_address,
@@ -235,6 +241,10 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
     // Its Cloudflare Tunnel, if it has one.
     crate::cloudflare::tunnel_loop::attach(&mut *db, &team_ids, &mut clusters).await?;
+    // Its traffic paths, as the Traffic card's switches show them.
+    for c in &mut clusters {
+        crate::traffic_paths::shown(c);
+    }
     // Its public and Tailscale addresses, and where its free domains point.
     for c in &mut clusters {
         let f = crate::freedomain::Cluster {
@@ -352,6 +362,14 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
     let mut services = services;
     crate::cloudflare::attach(&mut *db, &team_ids, &mut services).await?;
+    // Each domain's path, and whether it's served (its path is on).
+    for a in &mut services {
+        if let Some(c) = clusters.iter().find(|c| c["id"] == a["clusterId"]) {
+            let paths = crate::traffic_paths::of_shown(c);
+            let dd = c["tunnel"]["defaultDomain"].as_str().map(str::to_owned);
+            crate::traffic_paths::mark(&mut a["domains"], paths, dd.as_deref());
+        }
+    }
     // A service with its WAF on: where it stands ("installing" while the
     // engine starts on its cluster, "ready", "failed" with a message).
     for a in &mut services {
