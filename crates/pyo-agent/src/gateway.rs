@@ -545,7 +545,12 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
             "targetRefs": route_ref,
             "rateLimit": rate.cloned().unwrap_or_else(pyo_proto::firewall::idle_rate_limit),
         });
-        if !on_tailnet {
+        // Plain HTTP: the shared :80, whose filters every service's
+        // routes make. No message there (a filter per policy), so a
+        // service coming or going never changes them. A refused visitor
+        // gets the proxy's own 403.
+        let plain = !on_tailnet && !tunnel_on && !https;
+        if !on_tailnet && !plain {
             spec["responseOverride"] = system::firewall_response_override();
         }
         out.objects.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(&name), "spec": spec }));
@@ -4014,7 +4019,13 @@ mod tests {
             );
             let btp = &find(&r, "BackendTrafficPolicy", name)["spec"];
             assert_eq!(btp["rateLimit"], pyo_proto::firewall::idle_rate_limit(), "{name}");
-            assert_eq!(btp["responseOverride"], system::firewall_response_override(), "{name}");
+            // The message on HTTPS only: none on the shared :80, whose
+            // filters every service's routes make.
+            let plain = o["spec"]["parentRefs"][0]["name"] == HTTP_GATEWAY;
+            assert_eq!(btp.get("responseOverride").is_none(), plain, "{name}");
+            if !plain {
+                assert_eq!(btp["responseOverride"], system::firewall_response_override(), "{name}");
+            }
         }
         assert!(
             !r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
@@ -4130,9 +4141,13 @@ mod tests {
         want["spec"]["extProc"][0]["processingMode"] =
             json!({ "request": { "body": "BufferedPartial", "attributes": ["source.address"] } });
         assert_eq!(older, want);
-        // The message stays, the idle rate limit goes.
+        // Plain HTTP: no message, so the idle rate limit was all there is.
         let btp = find(&r, "BackendTrafficPolicy", "shop-web-http-http");
-        let older = older_form(btp).unwrap().unwrap();
+        assert_eq!(older_form(btp), Some(None));
+        // With the message (HTTPS), the message stays.
+        let mut https = btp.clone();
+        https["spec"]["responseOverride"] = system::firewall_response_override();
+        let older = older_form(&https).unwrap().unwrap();
         assert!(older["spec"].get("rateLimit").is_none());
         assert_eq!(older["spec"]["responseOverride"], system::firewall_response_override());
         // On a tailnet route that's all it has: none there.
@@ -4660,7 +4675,9 @@ mod tests {
             .unwrap();
 
         // Rate limits: the service's, but nothing else in them.
-        let btp = find(&r, "BackendTrafficPolicy", "shop-web-http-http").clone();
+        // Its plain HTTP route has no message: as an HTTPS route has it.
+        let mut btp = find(&r, "BackendTrafficPolicy", "shop-web-http-http").clone();
+        btp["spec"]["responseOverride"] = system::firewall_response_override();
         apply(btp.clone())
             .await
             .unwrap_or_else(|e| panic!("rate limits: {e}"));
