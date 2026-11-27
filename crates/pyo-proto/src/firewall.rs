@@ -561,10 +561,14 @@ pub fn open_web_authorization() -> Value {
 /// client), at 2^32-1 requests a second, which no proxy reaches. Without
 /// x-ratelimit-* headers: a rule that matched no one would leave a request
 /// to the default count, whose headers Envoy Gateway always turns on.
+/// `invert` as Envoy Gateway's CRD defaults it, so the stored policy is
+/// exactly this and the admission policy, which pins it, sees it as
+/// written (without it every write was refused, and the agent fell back
+/// to the policy without the rate limit).
 pub fn idle_rate_limit() -> Value {
     let rule = |cidr: &str| {
         json!({
-            "clientSelectors": [{ "sourceCIDR": { "type": "Exact", "value": cidr } }],
+            "clientSelectors": [{ "sourceCIDR": { "type": "Exact", "value": cidr, "invert": false } }],
             "limit": { "requests": u32::MAX, "unit": "Second" },
             "xRateLimitHeaders": "Off",
         })
