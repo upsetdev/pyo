@@ -1975,8 +1975,55 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
             );
         }
         assert!(CONNECT_SCRIPT.contains(
-            "if [ -n \"$REGISTRY\" ] || [ -n \"$LOCAL_REGISTRY_NEW\" ] || [ -n \"$GPU_TOOLKIT_NEW\" ] || [ -n \"$K3S_MEMORY_CHANGED\" ]; then systemctl restart k3s"
+            "if [ -n \"$REGISTRY_CHANGED\" ] || [ -n \"$LOCAL_REGISTRY_NEW\" ] || [ -n \"$GPU_TOOLKIT_NEW\" ] || [ -n \"$K3S_MEMORY_CHANGED\" ]; then systemctl restart k3s"
         ));
+    }
+
+    /// The connect command with --registry runs on every refresh. k3s reads
+    /// the registry's login only when it starts, and a restart takes the
+    /// Kubernetes API away for a while, so it restarts for a new address or
+    /// login and not when the file already says the same.
+    #[test]
+    fn existing_k3s_restarts_only_for_a_new_registry_login() {
+        let dir = std::env::temp_dir().join(format!("pyo-registry-login-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("registries.yaml");
+        let block = script_block("registry-login", CONNECT_SCRIPT).replace(
+            "/etc/rancher/k3s/registries.yaml",
+            &file.display().to_string(),
+        );
+        assert!(!block.contains("/etc/"));
+        // One run of the script: "changed" or "same".
+        let run = |registry: &str, token: &str| {
+            let (code, out, err) = bash(&format!(
+                "set -euo pipefail\nREGISTRY='{registry}' REGISTRY_TOKEN='{token}'\n{block}\nregistry_login\n\
+                 [ -n \"$REGISTRY_CHANGED\" ] && echo changed || echo same"
+            ));
+            assert_eq!(code, 0, "{err}");
+            out.trim().to_owned()
+        };
+        assert_eq!(run("100.64.0.1:5006", "ab12"), "changed");
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.contains("- \"http://100.64.0.1:5006\"\n"), "{written}");
+        assert!(written.contains("password: \"ab12\"\n"), "{written}");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |f: &std::path::Path| std::fs::metadata(f).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600);
+        // The same command again: nothing to restart for, and the file is as it was.
+        assert_eq!(run("100.64.0.1:5006", "ab12"), "same");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
+        // A new login or a new address is a change.
+        assert_eq!(run("100.64.0.1:5006", "cd34"), "changed");
+        assert_eq!(run("100.64.0.1:5006", "cd34"), "same");
+        assert_eq!(run("100.64.0.2:5006", "cd34"), "changed");
+        // A file someone left readable is closed again, without a restart.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(run("100.64.0.2:5006", "cd34"), "same");
+        assert_eq!(mode(&file), 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+        // The script writes the login through it, and only with --registry.
+        assert!(CONNECT_SCRIPT.contains("\n[ -z \"$REGISTRY\" ] || registry_login\n"));
     }
 
     /// A small machine is set up without a word: compressed swap turns on,

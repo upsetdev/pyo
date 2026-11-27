@@ -1,0 +1,476 @@
+{
+  "changes": [
+    {
+      "date": "2026-11-25",
+      "note": "First record. The GeoIP image is tagged with its database's date and the WAF image with a hash of its sources, so both get a new reference once."
+    },
+    {
+      "date": "2026-11-26",
+      "note": "Tunnel connector: trust gate and 20 s grace"
+    },
+    {
+      "date": "2026-11-27",
+      "note": "Third-party images move to the ghcr.io/upsetdev/pyo-mirror/ path, digests unchanged"
+    }
+  ],
+  "pods": {
+    "envoyGateway": {
+      "image": "ghcr.io/upsetdev/pyo-mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f",
+      "version": "v1.9.3"
+    },
+    "images": {
+      "geoip": "2026-11-06",
+      "waf": "3faf4b894ae9d11b"
+    },
+    "proxies": {
+      "geoIP": {
+        "provider": {
+          "maxMind": {
+            "countryDbSource": {
+              "local": {
+                "path": "/geoip/GeoLite2-Country.mmdb"
+              }
+            }
+          },
+          "type": "MaxMind"
+        }
+      },
+      "logging": {
+        "level": {
+          "default": "warn"
+        }
+      },
+      "mergeGateways": true,
+      "provider": {
+        "kubernetes": {
+          "envoyDaemonSet": {
+            "container": {
+              "image": "ghcr.io/upsetdev/pyo-mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:9d84a586119a27b50437dbb01eccd4722832741539b1ed53c8e9d6da6067a6e0",
+              "resources": {
+                "limits": {
+                  "memory": "512Mi"
+                },
+                "requests": {
+                  "cpu": "50m",
+                  "memory": "48Mi"
+                }
+              },
+              "volumeMounts": [
+                {
+                  "mountPath": "/geoip",
+                  "name": "geoip",
+                  "readOnly": true
+                }
+              ]
+            },
+            "patch": {
+              "type": "StrategicMerge",
+              "value": {
+                "spec": {
+                  "template": {
+                    "spec": {
+                      "automountServiceAccountToken": false,
+                      "containers": [
+                        {
+                          "name": "shutdown-manager",
+                          "resources": {
+                            "requests": {
+                              "cpu": "10m",
+                              "memory": "16Mi"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "pod": {
+              "affinity": {
+                "nodeAffinity": {
+                  "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                      {
+                        "matchExpressions": [
+                          {
+                            "key": "pyo/builder",
+                            "operator": "NotIn",
+                            "values": [
+                              "true"
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              },
+              "priorityClassName": "system-node-critical",
+              "tolerations": [
+                {
+                  "effect": "NoSchedule",
+                  "key": "nvidia.com/gpu",
+                  "operator": "Exists"
+                }
+              ],
+              "volumes": [
+                {
+                  "image": {
+                    "pullPolicy": "IfNotPresent",
+                    "reference": "<geoip>"
+                  },
+                  "name": "geoip"
+                }
+              ]
+            },
+            "strategy": {
+              "rollingUpdate": {
+                "maxSurge": 1,
+                "maxUnavailable": 0
+              },
+              "type": "RollingUpdate"
+            }
+          }
+        },
+        "type": "Kubernetes"
+      },
+      "routingType": "Service",
+      "shutdown": {
+        "drainTimeout": "6s",
+        "minDrainDuration": "3s"
+      },
+      "telemetry": {
+        "accessLog": {
+          "settings": [
+            {
+              "format": {
+                "json": {
+                  "bytes": "%BYTES_SENT%",
+                  "bytes_in": "%BYTES_RECEIVED%",
+                  "content_type": "%RESP(CONTENT-TYPE)%",
+                  "details": "%RESPONSE_CODE_DETAILS%",
+                  "duration_ms": "%DURATION%",
+                  "flags": "%RESPONSE_FLAGS%",
+                  "host": "%REQ(:AUTHORITY)%",
+                  "local_port": "%DOWNSTREAM_LOCAL_PORT%",
+                  "method": "%REQ(:METHOD)%",
+                  "path": "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%",
+                  "peer": "%DOWNSTREAM_DIRECT_REMOTE_ADDRESS_WITHOUT_PORT%",
+                  "referer": "%REQ(REFERER)%",
+                  "remote": "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%",
+                  "start_time": "%START_TIME%",
+                  "status": "%RESPONSE_CODE%",
+                  "termination": "%CONNECTION_TERMINATION_DETAILS%",
+                  "upstream": "%UPSTREAM_CLUSTER%",
+                  "upstream_host": "%UPSTREAM_HOST%",
+                  "user_agent": "%REQ(USER-AGENT)%",
+                  "x_forwarded_for": "%REQ(X-FORWARDED-FOR)%",
+                  "x_real_ip": "%REQ(X-REAL-IP)%"
+                },
+                "type": "JSON"
+              },
+              "sinks": [
+                {
+                  "file": {
+                    "path": "/dev/stdout"
+                  },
+                  "type": "File"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "tunnel": {
+      "metadata": {
+        "annotations": {
+          "pyo.dev/token-hash": "<token hash>",
+          "pyo.dev/tunnel-gate-version": "1",
+          "pyo.dev/tunnel-template": "76e6879d43aeebc6"
+        },
+        "labels": {
+          "app.kubernetes.io/name": "pyo-tunnel"
+        }
+      },
+      "spec": {
+        "affinity": {
+          "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+              "nodeSelectorTerms": [
+                {
+                  "matchExpressions": [
+                    {
+                      "key": "pyo/builder",
+                      "operator": "NotIn",
+                      "values": [
+                        "true"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "args": [
+              "tunnel",
+              "--no-autoupdate",
+              "--protocol",
+              "http2",
+              "--grace-period",
+              "20s",
+              "--metrics",
+              "0.0.0.0:2000",
+              "--loglevel",
+              "info",
+              "run"
+            ],
+            "env": [
+              {
+                "name": "TUNNEL_TOKEN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "token",
+                    "name": "pyo-tunnel"
+                  }
+                }
+              }
+            ],
+            "image": "ghcr.io/upsetdev/pyo-mirror/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba",
+            "livenessProbe": {
+              "failureThreshold": 6,
+              "httpGet": {
+                "path": "/ready",
+                "port": 2000
+              },
+              "initialDelaySeconds": 60,
+              "periodSeconds": 30
+            },
+            "name": "cloudflared",
+            "readinessProbe": {
+              "httpGet": {
+                "path": "/ready",
+                "port": 2000
+              },
+              "periodSeconds": 10
+            },
+            "resources": {
+              "limits": {
+                "memory": "128Mi"
+              },
+              "requests": {
+                "cpu": "10m",
+                "memory": "32Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true
+            }
+          }
+        ],
+        "initContainers": [
+          {
+            "args": [
+              "tunnel-gate"
+            ],
+            "env": [
+              {
+                "name": "RUST_LOG",
+                "value": "pyo_agent=info"
+              },
+              {
+                "name": "POD_IPS",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "status.podIPs"
+                  }
+                }
+              }
+            ],
+            "image": "<agent>",
+            "name": "tunnel-gate",
+            "resources": {
+              "limits": {
+                "memory": "64Mi"
+              },
+              "requests": {
+                "cpu": "5m",
+                "memory": "16Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true
+            }
+          }
+        ],
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 65532,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "terminationGracePeriodSeconds": 35,
+        "topologySpreadConstraints": [
+          {
+            "labelSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "pyo-tunnel"
+              }
+            },
+            "maxSkew": 1,
+            "topologyKey": "kubernetes.io/hostname",
+            "whenUnsatisfiable": "ScheduleAnyway"
+          }
+        ]
+      }
+    },
+    "waf": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "pyo",
+          "app.kubernetes.io/name": "pyo-waf"
+        }
+      },
+      "spec": {
+        "affinity": {
+          "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+              "nodeSelectorTerms": [
+                {
+                  "matchExpressions": [
+                    {
+                      "key": "pyo/builder",
+                      "operator": "NotIn",
+                      "values": [
+                        "true"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "automountServiceAccountToken": true,
+        "containers": [
+          {
+            "args": [
+              "-listen",
+              ":9002",
+              "-config",
+              "/etc/pyo-waf/config.json",
+              "-configmap",
+              "pyo-waf",
+              "-geoip",
+              "/geoip/GeoLite2-Country.mmdb"
+            ],
+            "image": "<waf>",
+            "name": "waf",
+            "ports": [
+              {
+                "containerPort": 9002,
+                "name": "grpc"
+              }
+            ],
+            "readinessProbe": {
+              "grpc": {
+                "port": 9002
+              },
+              "periodSeconds": 2
+            },
+            "resources": {
+              "limits": {
+                "memory": "384Mi"
+              },
+              "requests": {
+                "cpu": "50m",
+                "memory": "96Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/pyo-waf",
+                "name": "settings",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/tmp",
+                "name": "tmp"
+              },
+              {
+                "mountPath": "/geoip",
+                "name": "geoip",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "priorityClassName": "system-node-critical",
+        "securityContext": {
+          "runAsGroup": 65532,
+          "runAsNonRoot": true,
+          "runAsUser": 65532,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "serviceAccountName": "pyo-waf",
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "nvidia.com/gpu",
+            "operator": "Exists"
+          }
+        ],
+        "volumes": [
+          {
+            "configMap": {
+              "name": "pyo-waf"
+            },
+            "name": "settings"
+          },
+          {
+            "emptyDir": {
+              "sizeLimit": "16Mi"
+            },
+            "name": "tmp"
+          },
+          {
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "reference": "<geoip>"
+            },
+            "name": "geoip"
+          }
+        ]
+      }
+    }
+  }
+}

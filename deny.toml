@@ -30,6 +30,7 @@ yanked = "warn"
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa (Marvin attack) is reached only through webauthn-rs, which verifies signatures with RSA public keys. Pyo never decrypts or signs with an RSA private key there. crypto-glue 0.2.2 can't use the fixed rsa 0.10.0 yet." },
     { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys is in Cargo.lock only as a weak optional dependency of sqlx. Pyo uses sqlx's Postgres driver alone and never builds it." },
+    { id = "RUSTSEC-2026-0600", reason = "kube-client's openssl-tls connector. Pyo's kube dependencies use rustls-tls only, and openssl isn't in Cargo.lock. The fixed 4.2.1 comes as a normal update once it is two weeks old." },
 ]
 
 [licenses]

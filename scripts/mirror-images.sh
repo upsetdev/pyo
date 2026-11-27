@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copies the third-party images Pyo runs (deploy/mirrors.txt) to
-# ghcr.io/upsetdev/pyo/mirror, so installs never pull from Docker Hub.
+# ghcr.io/upsetdev/pyo-mirror, so installs never pull from Docker Hub.
 #
 #   scripts/mirror-images.sh list           # each source and its mirror
 #   scripts/mirror-images.sh check          # each source's digest is still there (read only)
@@ -15,7 +15,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 LIST=deploy/mirrors.txt
-MIRROR=ghcr.io/upsetdev/pyo/mirror
+MIRROR=ghcr.io/upsetdev/pyo-mirror
 
 die() { echo "mirror-images: $*" >&2; exit 1; }
 

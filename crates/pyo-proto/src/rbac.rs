@@ -2263,8 +2263,11 @@ mod tests {
 
     #[test]
     fn the_tunnel_connector_passes_the_pod_rules() {
-        let d =
-            system::tunnel_deployment(system::CLOUDFLARED_IMAGE, &system::tunnel_token_hash("tok"));
+        let d = system::tunnel_deployment(
+            system::CLOUDFLARED_IMAGE,
+            Some("ghcr.io/upsetdev/pyo/agent:1.2.3"),
+            &system::tunnel_token_hash("tok"),
+        );
         let pod = &d["spec"]["template"]["spec"];
         // The token's hash, never the token, restarts it on a new token.
         let hash =
@@ -2278,6 +2281,32 @@ mod tests {
         assert!(c.get("ports").is_none(), "nothing connects to it");
         assert!(c["args"].as_array().unwrap().contains(&json!("http2")));
         assert_eq!(d["metadata"]["namespace"], NS);
+        // The gate before it: the agent's image, as locked down, with no
+        // token of its own either, and only the pod's addresses to go by.
+        let gates = pod["initContainers"].as_array().unwrap();
+        assert_eq!(gates.len(), 1);
+        let g = &gates[0];
+        assert_eq!(g["image"], "ghcr.io/upsetdev/pyo/agent:1.2.3");
+        assert_eq!(g["args"], json!([system::TUNNEL_GATE]));
+        assert_eq!(g["securityContext"], c["securityContext"]);
+        assert!(g.get("volumeMounts").is_none() && g.get("ports").is_none());
+        assert!(g["env"].as_array().unwrap().contains(
+            &json!({ "name": "POD_IPS", "valueFrom": { "fieldRef": { "fieldPath": "status.podIPs" } } })
+        ));
+        // It asks the agent's pods, on the agent's own port.
+        let gate = system::tunnel_gate_service();
+        assert_eq!(gate["metadata"]["namespace"], NS);
+        assert_eq!(gate["spec"]["type"], "ClusterIP");
+        assert_eq!(gate["spec"]["selector"], json!({ "app.kubernetes.io/name": AGENT_DEPLOYMENT }));
+        assert_eq!(gate["spec"]["ports"][0]["port"], system::TUNNEL_GATE_PORT);
+        assert_ne!(system::TUNNEL_GATE_PORT, system::AGENT_RELAY_PORT);
+        assert_eq!(
+            system::tunnel_gate_address(),
+            "pyo-tunnel-gate.pyo-system.svc.cluster.local:8092"
+        );
+        // Without the agent's image: the connector alone.
+        let bare = system::tunnel_deployment(system::CLOUDFLARED_IMAGE, None, "h");
+        assert!(bare["spec"]["template"]["spec"].get("initContainers").is_none());
         assert_eq!(system::tunnel_budget()["spec"]["minAvailable"], 1);
         let s = system::tunnel_secret("c1744f8b-faa1-48a4-9e5c-02ac921467fa", "tok");
         assert_eq!(s["metadata"]["labels"][system::TUNNEL_ID_LABEL], "c1744f8b-faa1-48a4-9e5c-02ac921467fa");
@@ -2506,7 +2535,7 @@ mod tests {
                 objects(true),
                 self_update_objects()
             ])),
-            "d0b4b36254d0ae62"
+            "23f5a5f8c4118bbd"
         );
     }
 
@@ -2545,7 +2574,7 @@ mod tests {
         // code pins are part of the rules, Pyo's mirrors of them too).
         let text = json!(policy)
             .to_string()
-            .replace("ghcr.io/upsetdev/pyo/mirror/", "");
+            .replace("ghcr.io/upsetdev/pyo-mirror/", "");
         assert!(
             !text.contains("ghcr.io/upsetdev/") && !text.contains("127.0.0.1:5005"),
             "{text}"

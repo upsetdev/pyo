@@ -78,7 +78,7 @@
         "/^docs/.+\\.md$/"
       ],
       "matchStrings": [
-        "ghcr\\.io/upsetdev/pyo/mirror/(?<depName>[a-z0-9._/-]+):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+        "ghcr\\.io/upsetdev/pyo-mirror/(?<depName>[a-z0-9._/-]+):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
       ],
       "datasourceTemplate": "docker"
     },

@@ -125,8 +125,18 @@ of the rules: too much for a 2 GB server, and it grows with CPUs.
 
 ## Release
 
-It ships with Pyo, at Pyo's version: the release workflow
-(`.github/workflows/release.yml`, see `RELEASING.md`) runs these tests,
-builds and signs `ghcr.io/upsetdev/pyo/waf:X.Y.Z` with Pyo's other images,
-and pins its digest in `release.json`; installs set `PYO_WAF_IMAGE` from it.
+It ships with Pyo. Its image's tag isn't Pyo's version: it's a hash of
+what the image is built from (`scripts/image-tags.sh waf`:
+`deploy/images/waf.Dockerfile`, `go.mod`, `go.sum` and `cmd/` without the
+tests). The release workflow (`.github/workflows/release.yml`, see
+`RELEASING.md`) runs these tests. When `ghcr.io/upsetdev/pyo/waf:<hash>`
+isn't published yet, it builds and signs it. When it is, the release uses
+that image again. Either way it pins the digest in `release.json`, and
+installs set `PYO_WAF_IMAGE` from it. So the WAF's pods restart on
+clusters only with a release that changed one of those files.
+
+A change there also changes `crates/pyo-proto/testdata/inbound-pods.json`:
+record it as `RELEASING.md` says ("Restarts of the gateway, the WAF and
+the tunnel").
+
 Locally, `scripts/pyo-up.sh` builds it with the rest.

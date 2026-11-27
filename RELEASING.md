@@ -20,10 +20,15 @@ A version is one number for everything: `version` in the root `Cargo.toml`.
    runs the command by itself (see
    [The server Pyo runs on](#the-server-pyo-runs-on)). Say so in the notes,
    so an installation with only that cluster knows there's nothing to run.
-4. Write the API reference for the docs (see [API reference](#api-reference)):
+4. Check whether the release restarts the pods on the path of incoming
+   traffic: `git diff <last tag> -- crates/pyo-proto/testdata/inbound-pods.json`.
+   When that file changed, say at the top of the release notes what
+   restarts, as a `beforeYouUpdate` notice (see
+   [Restarts of the gateway, the WAF and the tunnel](#restarts-of-the-gateway-the-waf-and-the-tunnel)).
+5. Write the API reference for the docs (see [API reference](#api-reference)):
    `cargo run -p pyo-api --bin openapi`.
-5. Commit that to `main`, and wait for CI to pass.
-6. Tag the commit and push the tag:
+6. Commit that to `main`, and wait for CI to pass.
+7. Tag the commit and push the tag:
 
    ```bash
    git tag v0.1.0
@@ -33,9 +38,10 @@ A version is one number for everything: `version` in the root `Cargo.toml`.
 `.github/workflows/release.yml` then checks that the tag matches `Cargo.toml`,
 runs the tests (the WAF's Go tests in `waf/` too), publishes signed images
 to `ghcr.io/upsetdev/pyo/{pyo,agent,builder,flows,waf,geoip,db-controller,kv,postgres,mysql-operator,mysql-backup}`
-(all from `deploy/images/`, at the same version. The Rust binaries are
-compiled once, by the `binaries` job, and the Rust images' jobs take them
-from that run's build cache),
+(all from `deploy/images/`, at the same version, except `waf` and `geoip`,
+see [Images with their own tag](#images-with-their-own-tag). The Rust
+binaries are compiled once, by the `binaries` job, and the Rust images'
+jobs take them from that run's build cache),
 and creates a GitHub release with the CLI, the install scripts and
 `release.json`. The CLI is
 `pyo-linux-x86_64`, `pyo-linux-aarch64`, `pyo-macos-aarch64`,
@@ -154,7 +160,10 @@ What asks for one:
    `beforeYouUpdate` and `manualOnly` unless the patch needs them. Without
    commits it's a rebuild of the tag's code, which picks up what the
    Dockerfiles install as it is today. That's enough when the weekly check
-   says so and the base image's digest didn't change.
+   says so and the base image's digest didn't change. `waf` and `geoip`
+   aren't rebuilt that way: everything they're built from is pinned, so
+   they change only with a commit (see
+   [Images with their own tag](#images-with-their-own-tag)).
 3. Push the branch, open a pull request into `main` and wait for CI. The
    release checks the template catalog against pyo-templates' main, so if
    that check fails, cherry-pick the catalog's update too.
@@ -288,7 +297,9 @@ release carries it as an asset. Installations find it in **Settings › Updates*
 (they ask GitHub every 6 hours) and apply it from there. It holds:
 
 - `version`, and Pyo's images pinned by the digests the workflow just
-  signed (`ghcr.io/upsetdev/pyo/pyo:0.1.0@sha256:…`). Each one is a field
+  signed (`ghcr.io/upsetdev/pyo/pyo:0.1.0@sha256:…`). `waf` and `geoip`
+  have their own tags and may be an earlier release's image (see
+  [Images with their own tag](#images-with-their-own-tag)). Each one is a field
   of `ReleaseImages` (`crates/pyo-proto/src/lib.rs`), and the release's
   manifests may only use those of Pyo's images: an image added to the
   script is added there too (`cargo test` compares them), and the workflow
@@ -764,20 +775,137 @@ balancer images) from `docker.io/rancher` when it first starts. Pyo
 doesn't mirror those. Docker Hub sends them without rate limit headers
 today, so they don't count toward its anonymous limit.
 
+## Images with their own tag
+
+Two of Pyo's images aren't tagged with the release's version.
+`scripts/image-tags.sh` prints their tags:
+
+| Image | Tag | Changes when |
+|---|---|---|
+| `geoip` | The date of its GeoLite2 Country database, like `2026-11-06` | `GEOIP_DATE` in `deploy/images/geoip.Dockerfile` changes |
+| `waf` | 16 hex digits: a hash of `deploy/images/waf.Dockerfile`, `waf/go.mod`, `waf/go.sum` and `waf/cmd` without its tests | Any of those files changes |
+
+Why: Pyo Gateway's proxies, the WAF and the traffic store mount the
+`geoip` image, and the WAF runs the `waf` image. A pod restarts when its
+image's reference changes. With the version as the tag, all of them
+restarted on every cluster with every release, and a restart of the
+proxies closes open WebSockets.
+
+How the release workflow handles them (the `Tag` step of each image's job):
+
+- It asks ghcr.io for the image under its tag.
+- Not there: it builds, scans, pushes and signs it, like any image.
+- There already: it checks the image was signed by the release workflow,
+  scans it again, and builds nothing. `release.json` pins the same digest
+  as the release before, so nothing restarts.
+- Any other answer from the registry stops the job. It never pushes over a
+  tag that exists.
+- A release candidate publishes them the same way. The release after it
+  uses the candidate's images, so what was tested is what ships.
+
+A CRITICAL CVE with a fix in an image that's used again still stops the
+release. Fix it with a commit: a new base image digest or a dependency
+bump in `waf/go.mod` changes the hash, and the next tag builds a new image.
+
+Both Dockerfiles pin their base images by digest. Renovate moves them. A
+new digest in `waf.Dockerfile` is a new `waf` image, so the WAF restarts
+once with the release that has it.
+
+`scripts/pyo-up.sh` doesn't use these tags. It already keeps an image's
+last tag while its inputs are the same (`scripts/build-images.sh`).
+
+### Bump the GeoIP database
+
+The GeoLite2 databases are pinned in two Dockerfiles: Country in
+`deploy/images/geoip.Dockerfile` (the `geoip` image) and City in
+`deploy/images/pyo.Dockerfile` (bundled with Pyo, for analytics). Each has
+`ARG GEOIP_DATE`, `ARG GEOIP_COMMIT` and the tarball's SHA-256. The build
+downloads the tarball at that commit, checks the SHA-256 and checks the
+date in the tarball's folder name.
+
+They come from [GitSquared/node-geolite2-redist](https://github.com/GitSquared/node-geolite2-redist),
+which republishes MaxMind's files with MaxMind's `.sha256` beside each.
+That repository force-pushes its `master` about twice a week and removes
+the old tarballs from its history. A tarball is only in the commit that
+was `master`'s head after a push. GitHub still serves such a commit by its
+id after it leaves the branch, but may stop one day.
+
+To move to a newer database, about once a month:
+
+```bash
+scripts/geoip-pin.sh             # the newest one published at least 14 days ago
+scripts/geoip-pin.sh <commit>    # or the one at that commit
+```
+
+It downloads both tarballs at one commit, checks each against the `.sha256`
+beside it, and writes the date, the commit and the sums into both
+Dockerfiles. Then:
+
+1. Build it once: `docker build -f deploy/images/geoip.Dockerfile .`
+2. Record the new tag with the reason (see
+   [Restarts of the gateway, the WAF and the tunnel](#restarts-of-the-gateway-the-waf-and-the-tunnel)):
+   `PYO_INBOUND_PODS_NOTE='GeoIP database of <date>' cargo test -p pyo-proto --test inbound_pods`
+3. Commit the two Dockerfiles and `crates/pyo-proto/testdata/inbound-pods.json`.
+4. Say in the release notes that Pyo Gateway and the WAF restart once.
+
+Renovate can't do this bump: upstream has no tags or releases for the
+databases, and the date and SHA-256 aren't something it can look up.
+
+If a build fails because GitHub no longer has the pinned commit, bump to a
+newer database. A published `geoip` image is never built again, so only a
+first build of a date needs the commit.
+
+The licence files stay as before: the image carries MaxMind's
+`LICENSE.txt` and `COPYRIGHT.txt` next to the database. MaxMind's GeoLite2
+licence asks for a database to be replaced within 30 days of a newer one,
+which is why this is a monthly job.
+
+### Restarts of the gateway, the WAF and the tunnel
+
+`crates/pyo-proto/testdata/inbound-pods.json` records the settings of the
+pods every request passes through: the proxies (the EnvoyProxy settings,
+Envoy Gateway's version and image), the WAF's pod template, the Cloudflare
+Tunnel connector's pod template, and the `geoip` and `waf` tags. The test
+`inbound_pods` in `crates/pyo-proto/tests/` fails when the code gives
+anything else, and lists what changed and which pods restart.
+
+When the change is meant, record it with the reason:
+
+```bash
+PYO_INBOUND_PODS_NOTE='Envoy 1.39.6' cargo test -p pyo-proto --test inbound_pods
+```
+
+That rewrites the file and adds the note with today's date under
+`changes`. Commit it with the change. A Renovate pull request that moves
+Envoy, cloudflared or the WAF's base images fails this test until someone
+records it on its branch.
+
+For the release, write a `beforeYouUpdate` notice when the file changed
+since the last tag. For the proxies: "Pyo Gateway restarts once on each
+server. Open WebSockets reconnect." Requests are not dropped: a server's
+new proxy is ready before its old one stops.
+
 ## Third-party images
 
 Pyo doesn't pull from Docker Hub. Its anonymous pulls are rate limited,
 and an install on a shared address (an office, a cloud NAT, CI) failed
 when it hit the limit. The third-party images Pyo runs are copied to
-`ghcr.io/upsetdev/pyo/mirror`, and everything points there: the registry,
+`ghcr.io/upsetdev/pyo-mirror`, and everything points there: the registry,
 BuildKit, Postgres, ClickHouse, Garage, Vector, curl, cloudflared, restic,
 the database client tools, Valkey, and Envoy Gateway's chart, controller
 and Envoy.
 
+- The mirror is outside `ghcr.io/upsetdev/pyo/` on purpose. Installed
+  Pyos (0.1.0 to 0.51.0) refuse a release whose manifests use an image
+  under that prefix that the release doesn't pin, and the mirrors aren't
+  pinned there. The test `installed_pyos_accept_the_release_this_tree_makes`
+  (`crates/pyo-proto/src/lib.rs`) builds the release from
+  `deploy/k8s` and runs that rule. It runs with `cargo test` in CI and in
+  the release workflow's first job, before anything is published.
 - `deploy/mirrors.txt` lists each source by tag and digest. The mirror's
   path is the source's without its registry and `library/`.
   `docker.io/library/registry:3.1.2@sha256:…` becomes
-  `ghcr.io/upsetdev/pyo/mirror/registry:3.1.2`, with the same digest.
+  `ghcr.io/upsetdev/pyo-mirror/registry:3.1.2`, with the same digest.
 - `scripts/mirror-images.sh copy` copies them with `crane copy`. It keeps
   every platform and rebuilds nothing. It skips one that's there already,
   checks each copy's digest is the source's, and checks anyone can pull

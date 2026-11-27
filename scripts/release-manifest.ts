@@ -14,8 +14,12 @@
 //     --sandbox-gvisor-x86_64 <sha256> --sandbox-gvisor-aarch64 <sha256> \
 //     --verifier verifier --scripts release-scripts > release.json
 //
-// Images are pinned by digest. deploy/k8s/{platform,pyo}.yaml become JSON
-// objects. The sandbox templates' images (sandboxBase, sandboxDesktop) are
+// Images are pinned by digest, each at the release's version as its tag.
+// Two have a tag of their own, from scripts/image-tags.sh: geoip (its
+// database's date) and waf (a hash of its sources). Their tag, and so
+// their reference, changes only when the image does, so the pods that run
+// them don't restart with every release.
+// deploy/k8s/{platform,pyo}.yaml become JSON objects. The sandbox templates' images (sandboxBase, sandboxDesktop) are
 // the ones Pyo ships with, from crates/pyo-api/assets/sandbox-images/. Notices for this release come from
 // deploy/release-notices.json when its "version" is this one; the k3s a
 // fresh install gets, from deploy/k3s.env. `agentAccess` is the hash of the
@@ -38,7 +42,7 @@
 // `mirrors` lists the third-party images the release runs, from Pyo's
 // mirror (deploy/mirrors.txt, which the release copies there first), by
 // path and tag: "envoyproxy/envoy:distroless-v1.39.5" →
-// "ghcr.io/upsetdev/pyo/mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:…",
+// "ghcr.io/upsetdev/pyo-mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:…",
 // pinned by the source's digest.
 //
 // `verifier` lists the SHA-256 of the release's verifier for each
@@ -87,10 +91,21 @@ const cargo = readFileSync("Cargo.toml", "utf8").match(/^version = "(.+)"$/m)?.[
 if (cargo !== version && !args.has("allow-version-mismatch")) {
   fail(`--version ${version} doesn't match Cargo.toml (${cargo})`);
 }
+// The images with a tag of their own, as scripts/image-tags.sh gives them.
+// The release workflow publishes them under the same tags.
+const ownTags: Record<string, string> = (() => {
+  const run = Bun.spawnSync(["bash", "scripts/image-tags.sh"]);
+  if (run.exitCode !== 0) fail(`scripts/image-tags.sh failed: ${run.stderr.toString().trim()}`);
+  const lines = run.stdout.toString().trim().split("\n");
+  return Object.fromEntries(lines.map((l) => l.split(" ")));
+})();
+for (const name of ["geoip", "waf"]) {
+  if (!ownTags[name]) fail(`scripts/image-tags.sh gave no tag for ${name}`);
+}
 const ref = (name: string) => {
   const digest = need(name);
   if (!/^sha256:[0-9a-f]{64}$/.test(digest)) fail(`--${name} isn't a sha256 digest: ${digest}`);
-  return `${images}/${name}:${version}@${digest}`;
+  return `${images}/${name}:${ownTags[name] ?? version}@${digest}`;
 };
 // Each image by its name in the manifests (`__IMAGES__/<name>:__TAG__`) and
 // its key in release.json.
@@ -142,7 +157,7 @@ for (const major of ["16", "17", "18"]) {
 // Pyo's mirrors of third-party images (deploy/mirrors.txt): the mirror's
 // path is the source's without its registry and "library/", with the
 // source's digest. scripts/mirror-images.sh copies them the same way.
-const MIRROR = "ghcr.io/upsetdev/pyo/mirror";
+const MIRROR = "ghcr.io/upsetdev/pyo-mirror";
 const mirrors: Record<string, string> = {};
 for (const line of readFileSync("deploy/mirrors.txt", "utf8").split("\n")) {
   const src = line.trim();
