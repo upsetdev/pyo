@@ -6,6 +6,7 @@
 #   scripts/update-traffic-e2e.sh fast   --dev [--dev-tag TAG] [--out DIR] [--keep]
 #   scripts/update-traffic-e2e.sh update [--dev-tag TAG] [--out DIR] [--keep]
 #   scripts/update-traffic-e2e.sh paths  [--dev-tag TAG] [--out DIR] [--keep]
+#   scripts/update-traffic-e2e.sh gateway [--dev-tag TAG] [--out DIR] [--keep]
 #
 # It makes its own throwaway multipass VMs (zd-e2e-1, zd-e2e-2), installs a
 # published Pyo release on the first (--from, default 0.51.0), and deploys
@@ -50,6 +51,16 @@
 #         third service, tcp, has a public TCP port (18080) through the
 #         gateway: it's probed the same way, and the run turns TCP and UDP
 #         ports off and on while public ports are off.
+# gateway the cluster's Gateway section on the dev build
+#         (setClusterGateway, docs/traffic-and-gateway-design.md §15),
+#         under traffic: compression on and off (each answer checked for
+#         zstd, br and gzip as asked), the request timeout default changed
+#         (a slower request checked for its 504) and back, the idle
+#         timeout default changed and back, the TLS minimum 1.3 (TLS 1.2
+#         refused, 1.3 answered) and back, and HTTP/3 on (one real
+#         HTTP/3 request, from the VM with Ubuntu's python3-aioquic) and
+#         off. One server, like paths. The tunnel leg runs only with
+#         PYO_E2E_CF_TOKEN. Its VMs are zd-gw-1 and zd-gw-2.
 #
 # A watcher on the server logs every pod that starts, turns ready, stops
 # or goes away, so each failure is matched to the rollouts running then.
@@ -107,6 +118,7 @@ VM_IMAGE=${PYO_E2E_VM_IMAGE:-24.04}
 VM_IMAGES=127.0.0.1:5005/pyo
 DEV_IMAGES=${PYO_IMAGES:-127.0.0.1:5005/pyo}
 VM1=zd-e2e-1 VM2=zd-e2e-2
+[ "${1:-}" != gateway ] || VM1=zd-gw-1 VM2=zd-gw-2
 # paths: the tcp service's public TCP port.
 TCP_PORT=18080
 
@@ -127,9 +139,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$MODE" in
-  fast | update | paths) ;;
-  *) echo "Usage: update-traffic-e2e.sh fast|update|paths [--servers 2] [--out DIR] [--keep]" >&2; exit 2 ;;
+  fast | update | paths | gateway) ;;
+  *) echo "Usage: update-traffic-e2e.sh fast|update|paths|gateway [--servers 2] [--out DIR] [--keep]" >&2; exit 2 ;;
 esac
+[ "$MODE" != gateway ] || DEV=1
 if [ "$MODE" = paths ]; then
   DEV=1
   [ -n "${PYO_E2E_CF_TOKEN:-}" ] || { echo "paths needs PYO_E2E_CF_TOKEN: a Cloudflare token for one throwaway zone." >&2; exit 2; }
@@ -906,6 +919,140 @@ paths() {
   TUN_DOMAINS=()
 }
 
+# ── gateway: the Gateway section, one setting at a time ─────────────────────
+
+# gw_op JQ: setClusterGateway for the cluster with the JQ object's fields.
+gw_op() {
+  op "$(jq -n --arg c "$CLUSTER" "{op: \"setClusterGateway\", clusterId: \$c} + ($1)")"
+}
+# set_gateway JQ WHAT COMMAND...: the setting, then until COMMAND says it's in place.
+set_gateway() {
+  local change=$1 what=$2 out
+  shift 2
+  out=$(gw_op "$change") || { note "Pyo refused: $(masked "$out")"; return 1; }
+  note "Pyo: $(jq -c '{drops, settings}' <<<"$out")"
+  wait_for 600 "$what" "$@"
+}
+# web's route policies (not its anchor's) and routes, as the agent wrote them.
+web_policies() { kc -n pyo-gateway get backendtrafficpolicy -l "pyo/service-id=$WEB_ID" -o json | jq '[.items[] | select(.metadata.name | endswith("-anchor") | not)]'; }
+compressing() { web_policies | jq -e 'length > 0 and all(.[]; .spec.compressor != null or (.metadata.name | contains("-http-")))' >/dev/null; }
+not_compressing() { web_policies | jq -e 'length > 0 and all(.[]; .spec.compressor == null)' >/dev/null; }
+idle_is() { web_policies | jq -e --arg t "$1" 'length > 0 and all(.[]; (.spec.timeout.http.streamIdleTimeout // "none") == $t)' >/dev/null; }
+request_is() {
+  kc -n pyo-gateway get httproute -l "pyo/service-id=$WEB_ID" -o json |
+    jq -e --arg t "$1" '[.items[].spec.rules[] | select(.backendRefs) | .timeouts.request] | length > 0 and all(. == $t)' >/dev/null
+}
+# encoding ACCEPT: the Content-Encoding web answers with.
+encoding() {
+  curl -ks -o /dev/null -D - -m 5 -H "Accept-Encoding: $1" --resolve "$WEB_HOST:443:$IP1" "https://$WEB_HOST/" |
+    tr -d '\r' | awk -F': ' 'tolower($1) == "content-encoding" { print $2 }'
+}
+encodes() { [ "$(encoding "$1")" = "$2" ]; }
+compression_answers() {
+  local rc=0 e
+  for e in zstd br gzip; do
+    if wait_for 60 "web answers with $e" encodes "$e" "$e"; then note "Accept-Encoding: $e gets Content-Encoding: $e"; else rc=1; fi
+  done
+  return $rc
+}
+compression_on() { set_gateway '{compression: true}' "web's routes compress" compressing && compression_answers; }
+compression_off() {
+  set_gateway '{compression: false}' "web's routes don't compress" not_compressing || return 1
+  wait_for 60 "web answers uncompressed" encodes "zstd, br, gzip" "" && note "Accept-Encoding: zstd, br, gzip gets no Content-Encoding"
+}
+# A request slower than the default is cut with 504 at it, unless a service sets its own.
+request_default() { # SECONDS
+  set_gateway "{requestTimeout: $1}" "web's routes take ${1}s" request_is "${1}s" || return 1
+  [ "$1" = 120 ] || return 0
+  local got
+  got=$(curl -ks -o /dev/null -w '%{http_code} %{time_total}' -m 200 --resolve "$WEB_HOST:443:$IP1" "https://$WEB_HOST/?wait=125s" || true)
+  note "A request taking 125 s: $got (504 at about 120 s expected)"
+  [ "${got%% *}" = 504 ]
+}
+idle_default() { # SECONDS
+  local want="${1}s"
+  [ "$1" != 3600 ] || want=none
+  set_gateway "{idleTimeout: $1}" "web's routes have idle timeout $want" idle_is "$want"
+}
+tls_min_is() { [ "$(kc -n pyo-gateway get clienttrafficpolicy pyo-https -o jsonpath='{.spec.tls.minVersion}')" = "$1" ]; }
+tls_answers() { # VERSION: 200 over that TLS version only
+  [ "$(curl -ks -o /dev/null -w '%{http_code}' -m 5 "--tlsv$1" --tls-max "$1" --resolve "$WEB_HOST:443:$IP1" "https://$WEB_HOST/" || true)" = 200 ]
+}
+tls_refused() { ! tls_answers "$1"; }
+tls_min() { # 1.2|1.3
+  local rc=0
+  if [ "$1" = 1.3 ]; then
+    set_gateway '{tlsMin: "1.3"}' "pyo-https takes TLS 1.3 only" tls_min_is 1.3 || return 1
+    wait_for 60 "TLS 1.2 is refused" tls_refused 1.2 && note "TLS 1.2 refused" || rc=1
+    tls_answers 1.3 && note "TLS 1.3 answers" || { note "TLS 1.3 doesn't answer"; rc=1; }
+  else
+    set_gateway '{tlsMin: "1.2"}' "pyo-https takes TLS 1.2 again" tls_min_is "" || return 1
+    wait_for 60 "TLS 1.2 answers" tls_answers 1.2 && note "TLS 1.2 answers again" || rc=1
+  fi
+  return $rc
+}
+envoy_service() { kc -n pyo-gateway get svc -l gateway.envoyproxy.io/owning-gatewayclass=pyo -o json; }
+udp443() { envoy_service | jq -e '[.items[0].spec.ports[] | select(.protocol == "UDP" and .port == 443)] | length == 1' >/dev/null; }
+no_udp443() { envoy_service | jq -e '[.items[0].spec.ports[] | select(.protocol == "UDP")] | length == 0' >/dev/null; }
+svclb_ready() {
+  kc -n kube-system get pods -l svccontroller.k3s.cattle.io/svcnamespace=pyo-gateway -o json |
+    jq -e '.items | length > 0 and all(.[]; .metadata.deletionTimestamp == null and ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length == 1))' >/dev/null
+}
+h3_answers() { vm "$VM1" python3 /var/tmp/e2e/e2e.py h3 "$WEB_HOST" "$IP1" | grep -q '^h3 200$'; }
+alt_svc() {
+  curl -ks -o /dev/null -D - -m 5 --resolve "$WEB_HOST:443:$IP1" "https://$WEB_HOST/" | tr -d '\r' | awk -F': ' 'tolower($1) == "alt-svc" { print $2 }'
+}
+http3() { # on|off
+  if [ "$1" = on ]; then
+    set_gateway '{http3: true}' "Envoy's Service publishes UDP 443" udp443 || return 1
+    wait_for 300 "ServiceLB's pods are ready" svclb_ready || return 1
+    note "alt-svc: $(alt_svc)"
+    if [ -z "$H3_CLIENT" ]; then
+      note "HTTP/3 request: skipped: $H3_SKIP"
+    elif wait_for 120 "an HTTP/3 request answers" h3_answers; then
+      note "HTTP/3 request: $(vm "$VM1" python3 /var/tmp/e2e/e2e.py h3 "$WEB_HOST" "$IP1")"
+    else
+      note "HTTP/3 request: $(vm "$VM1" python3 /var/tmp/e2e/e2e.py h3 "$WEB_HOST" "$IP1" || true)"
+      return 1
+    fi
+  else
+    set_gateway '{http3: false}' "Envoy's Service no longer publishes UDP" no_udp443 || return 1
+    wait_for 300 "ServiceLB's pods are ready" svclb_ready
+  fi
+}
+# gw_action NAME COMMAND...: action, then its numbers per target.
+gw_action() {
+  local start end
+  start=$(date +%s.%N)
+  action "$@"
+  end=$(date +%s.%N)
+  echo "$1" >>"$DIR/gateway.txt"
+  tally_targets "$start" "$end" | sed 's/^/  /' | tee -a "$DIR/gateway.txt" | while IFS= read -r l; do note "$l"; done
+}
+H3_CLIENT="" H3_SKIP=""
+gateway_client() {
+  # An HTTP/3 client on the VM: Ubuntu's own aioquic, from its archive.
+  if vm "$VM1" sh -c 'apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-aioquic' >/dev/null 2>&1; then
+    H3_CLIENT=1
+  else
+    H3_SKIP="python3-aioquic didn't install on $VM1"
+  fi
+}
+gateway() {
+  : >"$DIR/gateway.txt"
+  gateway_client
+  gw_action "turn compression on" compression_on
+  gw_action "turn compression off" compression_off
+  gw_action "set the request timeout default to 120 s" request_default 120
+  gw_action "set the request timeout default back to 300 s" request_default 300
+  gw_action "set the idle timeout default to 10 minutes" idle_default 600
+  gw_action "set the idle timeout default back to 1 hour" idle_default 3600
+  gw_action "set the TLS minimum to 1.3" tls_min 1.3
+  gw_action "set the TLS minimum back to 1.2" tls_min 1.2
+  gw_action "turn HTTP/3 on" http3 on
+  gw_action "turn HTTP/3 off" http3 off
+}
+
 # ── update: the dev build as a release ──────────────────────────────────────
 
 # release.json for the dev build, as the release workflow writes it, with
@@ -1043,7 +1190,7 @@ if [ -n "$IP2" ]; then
   wait_for 300 "Envoy runs on both servers" envoy_on_both || die "Envoy didn't start on $VM2."
 fi
 deploy
-if { [ "$MODE" = fast ] || [ "$MODE" = paths ]; } && [ -n "$DEV" ]; then
+if { [ "$MODE" = fast ] || [ "$MODE" = paths ] || [ "$MODE" = gateway ]; } && [ -n "$DEV" ]; then
   # The dev build first, with no traffic: the restarts below are its own.
   vm "$VM1" mkdir -p /var/tmp/e2e
   send "$PY" /var/tmp/e2e/e2e.py
@@ -1061,6 +1208,7 @@ case "$MODE" in
   fast) fast ;;
   update) update ;;
   paths) paths ;;
+  gateway) gateway ;;
 esac
 
 say "Stopping the traffic"
@@ -1077,10 +1225,15 @@ if [ "$MODE" = paths ]; then
   echo "Per switch change:"
   cat "$DIR/paths.txt"
 fi
+if [ "$MODE" = gateway ]; then
+  echo "Per gateway setting:"
+  cat "$DIR/gateway.txt"
+fi
 if [ -n "$OUT" ]; then
   mkdir -p "$OUT"
   cp "$DIR/load.log" "$DIR/pods.log" "$DIR/actions.log" "$DIR/targets" "$DIR/summary.txt" "$OUT/"
   [ "$MODE" != paths ] || cp "$DIR/paths.txt" "$DIR/probes.log" "$OUT/"
+  [ "$MODE" != gateway ] || cp "$DIR/gateway.txt" "$OUT/"
   echo "Logs: $OUT"
 fi
 exit "$rc"
