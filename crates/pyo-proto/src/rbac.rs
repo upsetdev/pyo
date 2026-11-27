@@ -2523,7 +2523,10 @@ mod tests {
     /// the agent) comes from Pyo's mirror, with its controller's image:
     /// a refresh can't bring a chart, so a cluster gets it with its connect
     /// command (the one Pyo runs on runs it by itself). Until then its
-    /// gateway runs on the chart it has.
+    /// gateway runs on the chart it has. The chart's values also keep the
+    /// shutdown manager setting 0.51.0 had (system.rs
+    /// `CHART_SHUTDOWN_MANAGER_IMAGE`), so the update restarts the proxies
+    /// once.
     /// Change this only with a release that means to
     /// change the roles: from 0.51.0 on a cluster with the self-update role
     /// gets them with a refresh, any other with its connect command.
@@ -2535,7 +2538,7 @@ mod tests {
                 objects(true),
                 self_update_objects()
             ])),
-            "23f5a5f8c4118bbd"
+            "8418d4afda5237cd"
         );
     }
 

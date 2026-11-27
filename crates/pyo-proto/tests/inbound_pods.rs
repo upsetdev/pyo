@@ -31,7 +31,7 @@ const RESTARTS: &[(&str, &str)] = &[
     ),
     (
         "envoyGateway",
-        "Pyo Gateway's proxies restart, and open WebSockets reconnect",
+        "Envoy Gateway's controller restarts. A new version can restart Pyo Gateway's proxies too (see RELEASING.md), and open WebSockets reconnect",
     ),
     (
         "proxies",
@@ -76,9 +76,14 @@ fn pods() -> Value {
         .remove("envoyService");
     sorted(&json!({
         "images": { "geoip": tag("geoip"), "waf": tag("waf") },
-        // Envoy Gateway writes the proxies' DaemonSet from `proxies`, and
-        // its own image is their shutdown manager's.
-        "envoyGateway": { "version": system::ENVOY_GATEWAY_VERSION, "image": system::ENVOY_GATEWAY_IMAGE },
+        // Envoy Gateway writes the proxies' DaemonSet from `proxies`, which
+        // also set their shutdown manager's image. Its own settings name
+        // one too, used only for an EnvoyProxy that sets none (system.rs).
+        "envoyGateway": {
+            "version": system::ENVOY_GATEWAY_VERSION,
+            "image": system::ENVOY_GATEWAY_IMAGE,
+            "shutdownManagerSetting": system::CHART_SHUTDOWN_MANAGER_IMAGE,
+        },
         "proxies": proxies,
         "waf": system::waf_daemonset("<waf>", "<geoip>")["spec"]["template"],
         // The gate keeps the agent image it runs while the rest of the

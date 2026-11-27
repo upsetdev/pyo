@@ -15,11 +15,16 @@
     {
       "date": "2026-11-27",
       "note": "Firewall: websocket upgrades and new image"
+    },
+    {
+      "date": "2026-11-27",
+      "note": "Proxies set their shutdown manager image, so an update from 0.51.0 restarts them once"
     }
   ],
   "pods": {
     "envoyGateway": {
       "image": "ghcr.io/upsetdev/pyo-mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f",
+      "shutdownManagerSetting": "docker.io/envoyproxy/gateway:v1.9.3",
       "version": "v1.9.3"
     },
     "images": {
@@ -76,6 +81,7 @@
                       "automountServiceAccountToken": false,
                       "containers": [
                         {
+                          "image": "ghcr.io/upsetdev/pyo-mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f",
                           "name": "shutdown-manager",
                           "resources": {
                             "requests": {
