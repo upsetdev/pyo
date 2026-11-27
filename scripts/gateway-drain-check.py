@@ -37,10 +37,24 @@ STABLE = [
     ("waf_path_route", "waf_block"),
     ("service_added", "base"),
     ("base", "service_added"),
+    # Traffic paths: Tailnet off and on for a ts.net name, and a domain on
+    # the tunnel going from "switching" to "on".
+    ("base", "tailnet_on"),
+    ("tailnet_on", "base"),
+    ("tunnel_on", "tunnel_switching"),
 ]
 KNOWN = [
     ("waf_block", "base"),
     ("waf_log", "waf_block"),
+    # Traffic paths, as the design's cut table says: a free name on a
+    # Tailscale address loses its own chain when Tailnet goes off (it's
+    # the domain that stops), a domain moving to the tunnel or back drains
+    # its own chain once, and PROXY protocol drains the whole listener.
+    ("base", "tailnet_free_on"),
+    ("tunnel_switching", "base"),
+    ("base", "tunnel_on"),
+    ("proxy_protocol", "base"),
+    ("base", "proxy_protocol"),
 ]
 
 
