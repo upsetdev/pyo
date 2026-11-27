@@ -352,11 +352,16 @@ mod db_tests {
             };
             let commands = |db: sqlx::PgPool, c: String| async move {
                 let rows: Vec<Value> = sqlx::query_scalar("SELECT command FROM pyo.commands WHERE cluster_id = $1 AND status = 'pending' ORDER BY created_at")
-                    .bind(c)
+                    .bind(&c)
                     .fetch_all(&db)
                     .await
                     .unwrap();
-                sqlx::query("UPDATE pyo.commands SET status = 'done' WHERE status = 'pending'").execute(&db).await.unwrap();
+                // This cluster's only: the other tests share the database.
+                sqlx::query("UPDATE pyo.commands SET status = 'done' WHERE cluster_id = $1 AND status = 'pending'")
+                    .bind(&c)
+                    .execute(&db)
+                    .await
+                    .unwrap();
                 rows
             };
             let handed = |db: sqlx::PgPool, svc: String| async move {
