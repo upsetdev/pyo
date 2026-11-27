@@ -1588,13 +1588,24 @@ pub fn cdn_own_headers(cdn: &str) -> &'static [&'static str] {
     }
 }
 
+/// The start of the request headers Envoy Gateway's own filters set and
+/// its authorization reads (`x-eg-internal-geoip-country` and the rest of
+/// the GeoIP lookup's). Its GeoIP filter writes one only when the lookup
+/// finds a value, so a client's own would decide a country rule for an
+/// address the database doesn't have. Envoy Gateway removes them only
+/// before the request goes on, after its authorization.
+pub const INTERNAL_HEADER_PREFIX: &str = "x-eg-internal-";
+
 /// The proxies' header settings: every visitor header but `kept` is
 /// removed from requests as they come in ([`CDN_VISITOR_HEADERS`],
 /// [`OTHER_VISITOR_HEADERS`]), so neither Pyo's API nor a service behind
 /// the proxies sees an address a client made up. A proxy only takes such a
 /// header from a CDN that is the only one who can connect (origin pull, or
 /// a service behind it). X-Forwarded-For stays: the proxies append the
-/// address they saw, and Pyo reads it right to left.
+/// address they saw, and Pyo reads it right to left. Every header Envoy
+/// Gateway keeps for itself ([`INTERNAL_HEADER_PREFIX`]) is removed too,
+/// on every listener, before any HTTP filter runs (Envoy's early header
+/// mutation, part of the listener, so no route changes it).
 pub fn visitor_headers(kept: &[&str]) -> Value {
     let remove: Vec<&str> = CDN_VISITOR_HEADERS
         .iter()
@@ -1602,7 +1613,10 @@ pub fn visitor_headers(kept: &[&str]) -> Value {
         .filter(|h| !kept.contains(h))
         .copied()
         .collect();
-    json!({ "earlyRequestHeaders": { "remove": remove } })
+    json!({ "earlyRequestHeaders": {
+        "remove": remove,
+        "removeOnMatch": [{ "type": "Prefix", "value": INTERNAL_HEADER_PREFIX }],
+    } })
 }
 
 /// Client traffic policies, on every Pyo Gateway: the visitor is the
@@ -3410,7 +3424,12 @@ mod tests {
             for spec in client_policy_variants(https) {
                 // Only the settings' headers: nothing else in them.
                 assert_eq!(spec["headers"].as_object().unwrap().len(), 1, "{spec}");
-                assert_eq!(spec["headers"]["earlyRequestHeaders"].as_object().unwrap().len(), 1);
+                assert_eq!(spec["headers"]["earlyRequestHeaders"].as_object().unwrap().len(), 2);
+                // Envoy Gateway's own headers go on every listener.
+                assert_eq!(
+                    spec["headers"]["earlyRequestHeaders"]["removeOnMatch"],
+                    json!([{ "type": "Prefix", "value": "x-eg-internal-" }])
+                );
                 let origin_pull = spec["tls"]["clientValidation"].is_object();
                 if origin_pull {
                     // Only the CDN gets through: its headers pass, the rest go.
@@ -3432,6 +3451,7 @@ mod tests {
             let cdn = cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into()], w, &["173.245.48.0/20".into()]);
             let r = removed(&cdn);
             assert!(!r.iter().any(|h| h == "cf-connecting-ip" || h == "cf-connecting-ipv6"), "{r:?}");
+            assert_eq!(cdn["headers"]["earlyRequestHeaders"]["removeOnMatch"], visitor_headers(&[])["earlyRequestHeaders"]["removeOnMatch"]);
             for h in ["true-client-ip", "fastly-client-ip", "x-real-ip", "x-client-ip", "forwarded"] {
                 assert!(r.iter().any(|x| x == h), "{h}");
             }
@@ -3441,6 +3461,7 @@ mod tests {
         // The tailnet listeners: everything goes, and that's all the policy sets.
         let tn = tailnet_client_policy_spec();
         assert_eq!(removed(&tn), all);
+        assert_eq!(tn["headers"], visitor_headers(&[]));
         assert_eq!(
             tn["targetRefs"],
             json!([{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": TAILNET_GATEWAY }])

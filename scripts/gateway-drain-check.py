@@ -159,8 +159,9 @@ def previous(objs):
     """The objects as the release before the Gateway section wrote them:
     no anchor routes, their policies or their filter (the shared :80's
     anchor too), no policy on Pyo's own tailnet
-    routes, no compression or idle timeout on routes, no HTTP/3 or TLS
-    minimum on the client policies."""
+    routes, no compression or idle timeout on routes, no HTTP/3, TLS
+    minimum or removal of Envoy Gateway's own headers on the client
+    policies."""
     out = []
     for o in objs:
         name, kind = o["metadata"]["name"], o["kind"]
@@ -173,6 +174,9 @@ def previous(objs):
             o["spec"].pop("compressor", None)
             o["spec"].pop("timeout", None)
         if kind == "ClientTrafficPolicy":
+            # Envoy Gateway's own headers removed on every listener
+            # (system.rs INTERNAL_HEADER_PREFIX): new in this release too.
+            o["spec"].get("headers", {}).get("earlyRequestHeaders", {}).pop("removeOnMatch", None)
             o["spec"].pop("http3", None)
             o["spec"].get("tls", {}).pop("minVersion", None)
             if o["spec"].get("tls") == {}:
