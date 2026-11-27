@@ -5,6 +5,7 @@
 mod api;
 mod backup;
 mod cloudflare;
+mod cluster;
 mod compose;
 mod config;
 mod db;
@@ -287,6 +288,14 @@ enum Command {
         #[arg(long, global = true)]
         team: Option<String>,
     },
+    /// A cluster's settings: its traffic paths.
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommand,
+        /// The team (slug or id). Defaults to your first team.
+        #[arg(long, global = true)]
+        team: Option<String>,
+    },
     /// Who may reach the service: its firewall rules, and a CDN in front.
     Firewall {
         #[command(subcommand)]
@@ -452,6 +461,40 @@ enum DomainCommand {
         /// Replace the records in the way. Owners and admins.
         #[arg(long)]
         replace: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClusterCommand {
+    /// Show or turn the cluster's traffic paths on and off: public ports 80
+    /// and 443, Cloudflare Tunnel and websites on the tailnet. Turning one
+    /// off that domains use lists them first. Owners and admins.
+    Paths {
+        /// The cluster, by name or id.
+        cluster: String,
+        /// Ports 80 and 443 on the servers: on or off.
+        #[arg(long)]
+        public: Option<String>,
+        /// Cloudflare Tunnel: on or off. Off removes it at Cloudflare.
+        #[arg(long)]
+        tunnel: Option<String>,
+        /// Websites on the tailnet: on or off. Servers stay on the tailnet.
+        #[arg(long)]
+        tailnet: Option<String>,
+        /// TCP and UDP ports on the servers while public ports are off: on or off.
+        #[arg(long)]
+        ports: Option<String>,
+        /// Turning public ports off: move domains in the tunnel's Cloudflare
+        /// account to the tunnel first (on by default): on or off.
+        #[arg(long)]
+        move_to_tunnel: Option<String>,
+        /// Turning the tunnel off: put back the records it replaced (on by
+        /// default): on or off.
+        #[arg(long)]
+        restore_records: Option<String>,
+        /// Go ahead when domains move or stop.
+        #[arg(long, short)]
+        yes: bool,
     },
 }
 
@@ -1217,6 +1260,32 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                     back,
                     no_restore,
                 } => cloudflare::domain_tunnel(&api, s, &hostname, !back, replace, !no_restore).await,
+            }
+        }
+        Command::Cluster { command, team } => {
+            let api = config::client(url, token)?;
+            match command {
+                ClusterCommand::Paths {
+                    cluster,
+                    public,
+                    tunnel,
+                    tailnet,
+                    ports,
+                    move_to_tunnel,
+                    restore_records,
+                    yes,
+                } => {
+                    let v = |o: Option<String>| o.as_deref().map(cluster::on_off).transpose();
+                    let change = cluster::Change {
+                        public: v(public)?,
+                        tunnel: v(tunnel)?,
+                        tailnet: v(tailnet)?,
+                        ports: v(ports)?,
+                        move_to_tunnel: v(move_to_tunnel)?,
+                        restore_records: v(restore_records)?,
+                    };
+                    cluster::paths(&api, team.as_deref(), &cluster, change, yes).await
+                }
             }
         }
         Command::Cloudflare { command, team } => {
