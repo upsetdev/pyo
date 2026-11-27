@@ -1038,7 +1038,8 @@ this list wins.
   hostnames, exact path `/.well-known/pyo/anchor`, an `ExtensionRef` to the
   `HTTPRouteFilter` `pyo-not-found`, which answers 404) with a
   BackendTrafficPolicy holding the three compressors and the idle rate
-  limit. The tailnet Gateway gets `pyo-tailnet-anchor` on its HTTPS
+  limit, and a SecurityPolicy with a country rule ("Country rules change
+  routes only", below). The tailnet Gateway gets `pyo-tailnet-anchor` on its HTTPS
   listener, written with its fixed objects. The public dashboard's Gateway
   gets none: no route there ever compresses. An install that refuses an
   anchor (older admission policy) skips it quietly. The agent's role gains
@@ -1059,11 +1060,48 @@ this list wins.
   `idle_rate_limit` now writes `invert` as the CRD stores it. Where routes
   lacked the rate limit filter, the first routes written after the update
   add it: the same once-only drain as the anchors, at the same moment.
-- **A country rule drains its service's chains** (found with the drain
-  check once client policies are matched to their Gateways, 2026-11-27):
-  a service's first or last country rule adds or removes the `geoip`
-  filter on its HTTPS chains and the shared :80 chain. Not changed here.
-  Listed as known in `scripts/gateway-drain-check.py`.
+- **Country rules change routes only** (2026-11-27). A service's first or
+  last country rule used to add or remove the `geoip` filter on its HTTPS
+  chains and the shared :80 chain, so every plain HTTP connection on the
+  cluster and the service's HTTPS connections dropped once (found with the
+  drain check once client policies were matched to their Gateways). Envoy
+  Gateway adds that filter to a chain only while a route there has a
+  country rule (`geoip.go`, `patchHCM`), and has no way to turn it off per
+  route. So the filter now stays on:
+  - each service's anchor gets a SecurityPolicy `<base>-anchor` with one
+    rule, allow country `ZZ` (a code no visitor is in), default allow
+    (`system::anchor_security_spec`). It passes the admission policy's
+    existing rule for a service's route policies.
+  - the shared :80 listener gets an anchor of its own, `pyo-anchor` (route
+    and SecurityPolicy, `system::http_anchor_objects`), written with the
+    gateway's fixed objects once the 404 filter is there. The admission
+    policy pins its SecurityPolicy exactly, which moves `agentAccess`:
+    0.52.0 asks for the connect command anyway.
+  - Cost: the filter looks up every request's address on those chains.
+    Measured on Envoy v1.39.5 with one worker and direct 200 answers, 4
+    rounds of about 650,000 requests each: 21.4 to 22.8 µs of CPU per
+    request without the filter, 23.2 to 24.4 µs with it for an address in
+    the database, 20.5 to 22.0 µs for one that isn't (a private address).
+    About 2 µs per request, on every service's HTTPS and plain HTTP.
+  - The update adds the filter where it was missing: the same once-only
+    drain as the anchors, at the same moment (§20, "This release's
+    update").
+  - Measured (`scripts/update-traffic-e2e.sh fast --dev`, one multipass
+    server updated from 0.51.0 to this branch's build, 2026-11-28): "add
+    and remove a country rule of web" (web's first country rule, then its
+    last one gone) under traffic to web, waf and web's plain HTTP domain
+    on :80: 1,878 short requests, 0 failed, 0 long requests cut, 0
+    WebSocket drops.
+- **Envoy Gateway v1.9.3 takes no country rule where the visitor comes
+  from X-Forwarded-For** (found with the drain check, 2026-11-27, not
+  fixed): behind a CDN (`firewall.behind`) or through the tunnel, the
+  listener's client policy trusts X-Forwarded-For from `trustedCIDRs`, and
+  `validateAuthorizationGeoIP` refuses that. A route with a country rule
+  there answers 500. The anchor's path there answers 500 instead of 404,
+  and that chain has no geoip filter. `scripts/gateway-drain-check.py`
+  lists those routes. The tunnel design's line that country rules see the
+  visitor through the tunnel (`cloudflare-tunnel.md`) isn't so for Envoy
+  Gateway's country rules: neither gate e2e checks one.
 - **Pyo's own tailnet routes** (`pyo-dashboard`, `pyo-registry-door`,
   `pyo-sandboxes`) each get a BackendTrafficPolicy with the idle rate
   limit, pinned exactly by the admission policy. With it and the tailnet
