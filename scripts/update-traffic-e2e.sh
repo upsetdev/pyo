@@ -46,7 +46,10 @@
 #         prints its numbers per target. The moving domain (mv,
 #         zd-mv-<random>.<zone>) is probed on both of its paths 4 times a
 #         second while it moves: "both down" counts the moments neither
-#         answered, which a visitor following DNS would have seen.
+#         answered, which a visitor following DNS would have seen. A
+#         third service, tcp, has a public TCP port (18080) through the
+#         gateway: it's probed the same way, and the run turns TCP and UDP
+#         ports off and on while public ports are off.
 #
 # A watcher on the server logs every pod that starts, turns ready, stops
 # or goes away, so each failure is matched to the rollouts running then.
@@ -104,6 +107,8 @@ VM_IMAGE=${PYO_E2E_VM_IMAGE:-24.04}
 VM_IMAGES=127.0.0.1:5005/pyo
 DEV_IMAGES=${PYO_IMAGES:-127.0.0.1:5005/pyo}
 VM1=zd-e2e-1 VM2=zd-e2e-2
+# paths: the tcp service's public TCP port.
+TCP_PORT=18080
 
 MODE=${1:-}
 [ $# -eq 0 ] || shift
@@ -289,6 +294,9 @@ op() { api POST /api/v1/ops "$1"; }
 state() { api GET /api/v1/state; }
 cluster_connected() { state | jq -e '.clusters[0].status == "connected"'; }
 
+# The tcp service's public TCP port answers (plain HTTP over it).
+tcp_answers() { [ "$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://$IP1:$TCP_PORT/" || true)" = 200 ]; }
+
 # answers HOST IP PATH [STATUS]
 answers() {
   [ "$(curl -ks -o /dev/null -w '%{http_code}' -m 5 --resolve "$1:443:$2" "https://$1/$3" || true)" = "${4:-200}" ]
@@ -330,12 +338,15 @@ deploy() {
   WEB_HOST="web.$dash.nip.io" WAF_HOST="waf.$dash.nip.io" EXTRA_HOST="extra.$dash.nip.io"
   say "Deploying $RUN: https://$WEB_HOST and https://$WAF_HOST"
   compose=$(printf 'services:\n  web:\n    image: %s\n    ports: ["80"]\n  waf:\n    image: %s\n    ports: ["80"]\n' "$ECHO_IMAGE" "$ECHO_IMAGE")
+  # paths: a public TCP port too, through the gateway (TCP_PORT).
+  [ "$MODE" != paths ] || compose+=$(printf '\n  tcp:\n    image: %s\n    ports: ["80"]\n' "$ECHO_IMAGE")
   plan=$(api POST /api/v1/compose/preview "$(jq -n --arg t "$TEAM" --arg c "$CLUSTER" --arg f "$compose" '{teamId: $t, clusterId: $c, file: $f}')") ||
     die "Pyo couldn't read the test's Compose file: $plan"
   plan=$(jq --arg n "$RUN" --arg web "$WEB_HOST" --arg waf "$WAF_HOST" '
     .project.name = $n | .project.namespace = $n
     | (.services[] | select(.name == "web") | .ports[0].domain) = $web
-    | (.services[] | select(.name == "waf") | .ports[0].domain) = $waf' <<<"$plan")
+    | (.services[] | select(.name == "waf") | .ports[0].domain) = $waf
+    | (.services[] | select(.name == "tcp") | .ports[0]) |= (.protocol = "TCP" | .public = true | .publicPort = 18080 | .domain = null)' <<<"$plan")
   out=$(op "$(jq -n --arg t "$TEAM" --arg c "$CLUSTER" --argjson p "$plan" '{op: "importCompose", teamId: $t, clusterId: $c, plan: $p}')") ||
     die "Pyo couldn't deploy the test project: $out"
   WEB_ID=$(service_id web)
@@ -361,6 +372,10 @@ deploy() {
     wait_for 120 "$WEB_HOST answers on $ip" answers "$WEB_HOST" "$ip" "" || die "$WEB_HOST doesn't answer on $ip."
   done
   note "The WAF blocks a test attack with 403, and lets a plain request through."
+  if [ "$MODE" = paths ]; then
+    wait_for 600 "the TCP port $TCP_PORT answers on $IP1" tcp_answers || { diagnose; die "The public TCP port didn't answer."; }
+    note "The tcp service answers on TCP port $TCP_PORT."
+  fi
   [ -n "$TUNNEL" ] || note "Tunnel domain: skipped: no test zone"
 }
 failed_deploy() {
@@ -788,8 +803,8 @@ set_path() {
   wait_for 900 "$what" "$@"
 }
 
-# The moving domain on both of its paths, 4 times a second, until stopped:
-# "<time> <direct status> <edge status>".
+# During each step, 4 times a second: the moving domain on both of its
+# paths and the TCP port. "<time> <direct> <edge> <tcp>" (HTTP statuses).
 probe_start() {
   rm -f "$DIR/probe-stop"
   : >"$DIR/probe.log"
@@ -798,7 +813,8 @@ probe_start() {
     while [ ! -e "$DIR/probe-stop" ]; do
       d=$(curl -ks -o /dev/null -w '%{http_code}' -m 2 --resolve "$MV_HOST:443:$IP1" "https://$MV_HOST/" || true)
       e=$(curl -s -o /dev/null -w '%{http_code}' -m 2 --resolve "$MV_HOST:443:$EDGE" "https://$MV_HOST/" || true)
-      echo "$(date +%s.%N) $d $e" >>"$DIR/probe.log"
+      t=$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://$IP1:$TCP_PORT/" || true)
+      echo "$(date +%s.%N) $d $e $t" >>"$DIR/probe.log"
       sleep 0.25
     done
   ) &
@@ -808,8 +824,10 @@ probe_stop() {
   touch "$DIR/probe-stop"
   wait "$PROBE_PID" 2>/dev/null || true
   PROBE_PID=""
-  LC_ALL=C awk '{ n++; d = ($2 == "200"); e = ($3 == "200"); if (d && e) both++; else if (d) direct++; else if (e) edge++; else down++ }
-    END { printf "%s: %d probes, %d on both paths, %d direct only, %d through the edge only, %d both down\n", host, n, both, direct, edge, down }' host="$MV_HOST" "$DIR/probe.log"
+  LC_ALL=C awk '{ n++; d = ($2 == "200"); e = ($3 == "200"); if (d && e) both++; else if (d) direct++; else if (e) edge++; else down++
+                  if ($4 == "200") t++; else { tf++; ts[$4]++ } }
+    END { printf "mv: %d probes, %d on both paths, %d direct only, %d through the edge only, %d both down. TCP port: %d answered, %d failed", n, both, direct, edge, down, t, tf
+          for (k in ts) printf " (%s: %d)", k, ts[k]; printf "\n" }' "$DIR/probe.log"
   cat "$DIR/probe.log" >>"$DIR/probes.log"
 }
 
@@ -818,9 +836,8 @@ mv_direct() { domain_of "$WEB_ID" "$MV_HOST" | jq -e '.tunnel == null' >/dev/nul
 move_mv() { # on|off
   local id out rc=0
   id=$(domain_of "$WEB_ID" "$MV_HOST" | jq -r .id)
-  probe_start
   out=$(op "$(jq -n --arg s "$WEB_ID" --arg d "$id" --argjson on "$([ "$1" = on ] && echo true || echo false)" '{op: "setDomainTunnel", serviceId: $s, domainId: $d, on: $on, restore: false}')") ||
-    { note "$(probe_stop)"; note "Pyo refused: $(masked "$out")"; return 1; }
+    { note "Pyo refused: $(masked "$out")"; return 1; }
   if [ "$1" = on ]; then
     wait_for 600 "$MV_HOST is on the tunnel" mv_on_tunnel || rc=1
   else
@@ -828,17 +845,23 @@ move_mv() { # on|off
   fi
   # A minute more on both paths.
   sleep 60
-  note "$(probe_stop)"
   return $rc
 }
 public_off() {
   local rc=0
-  probe_start
   set_path '{public: false, moveToTunnel: true, publicPorts: true}' "public ports are closed after the move" \
     cluster_is '.traffic == "tunnel" and (.closingPublic | not)' || rc=1
   wait_for 300 "Envoy's Service is ClusterIP" is_type ClusterIP || rc=1
   sleep 60
-  note "$(probe_stop)"
+  return $rc
+}
+ports_service() { kc -n pyo-gateway get svc pyo-public-ports >/dev/null 2>&1; }
+no_ports_service() { ! ports_service; }
+public_on() {
+  local rc=0
+  set_path '{public: true}' "web answers on public ports again" answers "$WEB_HOST" "$IP1" "" || rc=1
+  wait_for 300 "the TCP port is back on Envoy's own Service" no_ports_service || rc=1
+  wait_for 120 "the TCP port answers" tcp_answers || rc=1
   return $rc
 }
 
@@ -855,12 +878,14 @@ tally_targets() {
 }
 # path_action NAME COMMAND...: action, then its numbers per target.
 path_action() {
-  local start end
+  local start end probes
+  probe_start
   start=$(date +%s.%N)
   action "$@"
   end=$(date +%s.%N)
+  probes=$(probe_stop)
   echo "$1" >>"$DIR/paths.txt"
-  tally_targets "$start" "$end" | sed 's/^/  /' | tee -a "$DIR/paths.txt" | while IFS= read -r l; do note "$l"; done
+  { tally_targets "$start" "$end"; echo "$probes"; } | sed 's/^/  /' | tee -a "$DIR/paths.txt" | while IFS= read -r l; do note "$l"; done
 }
 
 paths() {
@@ -873,7 +898,9 @@ paths() {
   path_action "move $MV_HOST to the tunnel" move_mv on
   path_action "move $MV_HOST back to public ports" move_mv off
   path_action "turn Public ports off ($MV_HOST moves first)" public_off
-  path_action "turn Public ports on" set_path '{public: true}' "web answers on public ports again" answers "$WEB_HOST" "$IP1" ""
+  path_action "turn TCP and UDP ports off" set_path '{publicPorts: false}' "pyo-public-ports is gone" no_ports_service
+  path_action "turn TCP and UDP ports on" set_path '{publicPorts: true}' "the TCP port answers again" tcp_answers
+  path_action "turn Public ports on" public_on
   path_action "turn Cloudflare Tunnel off" set_path '{tunnel: false, restoreRecords: false}' "Pyo removed the tunnel" tunnel_gone
   # The tunnel and its records are gone with it.
   TUN_DOMAINS=()
