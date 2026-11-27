@@ -4417,30 +4417,57 @@ mod tests {
             // A domain moving to the tunnel, on it, and (as base) back.
             ("tunnel_switching", shop(&|s| s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into())),
             ("tunnel_on", shop(&|s| s.domains[0].tunnel = pyo_proto::TUNNEL_ON.into())),
+            // The Gateway section (§15): compression and the timeout
+            // defaults change routes only, on public and tailnet routes.
+            ("compression_on", shop(&|s| s.compression = true)),
+            ("idle_timeout", shop(&|s| s.idle_timeout = Some(600))),
+            ("request_timeout", shop(&|s| s.request_timeout = Some(60))),
+            ("tailnet_compression", shop(&|s| {
+                s.domains.push(domain("shop.tail1234.ts.net", "http", "", false));
+                s.compression = true;
+            })),
+            ("tunnel_compression", shop(&|s| {
+                s.domains[0].tunnel = pyo_proto::TUNNEL_ON.into();
+                s.compression = true;
+            })),
+        ];
+        // The listener settings (HTTP/3, TLS 1.3): the client policies.
+        let web_states: Vec<(&str, system::WebSettings)> = vec![
+            ("http3_on", system::WebSettings { http3: true, ..Default::default() }),
+            ("tls13", system::WebSettings { tls13: true, ..Default::default() }),
         ];
         // A third service, new on the cluster, with a plain HTTP domain.
         let mut added = spec(vec![domain("new.example.com", "http", "", false)]);
         added.service.service_id = "svc_new".into();
         added.service.namespace = "new".into();
-        let fixed = vec![
-            system::gateway_class(),
-            system::envoy_proxy("geoip", true),
-            system::http_gateway(),
-            system::waf_backend(),
-            system::client_policy(false, system::WebSettings::default()),
-            system::client_policy(true, system::WebSettings::default()),
-        ];
+        let fixed = |w: system::WebSettings| {
+            vec![
+                system::gateway_class(),
+                system::envoy_proxy("geoip", true),
+                system::http_gateway(),
+                system::waf_backend(),
+                system::not_found_filter(),
+                system::client_policy(false, system::WebSettings { origin_pull: false, http3: false, tls13: false, ..w }),
+                system::client_policy(true, w),
+            ]
+        };
         // The tailnet Gateway, with the certificate of the service's ts.net
-        // name: it stays while the Tailnet switch is off.
-        let tailnet = json!({
-            "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway",
-            "metadata": { "name": system::TAILNET_GATEWAY, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": MANAGER } },
-            "spec": system::tailnet_gateway_spec(&[system::tailnet_tls_secret("shop")]),
-        });
+        // name (it stays while the Tailnet switch is off) and Pyo's own
+        // dashboard name, as on the cluster Pyo runs on: its fixed objects,
+        // with the anchor and the policy on Pyo's own routes.
+        let own = system::TailnetOwn { dashboard: Some("pyo.tail1234.ts.net".into()), ..Default::default() };
+        let tailnet = |w: system::WebSettings| {
+            system::tailnet_objects_with(&[], &[system::tailnet_tls_secret("shop"), system::tailnet_tls_secret("pyo")], &own, w.tls13)
+        };
         std::fs::create_dir_all(&dir).unwrap();
-        for (name, s) in states {
-            let mut objects = fixed.clone();
-            objects.push(tailnet.clone());
+        let base = shop(&|_| {});
+        let all = states
+            .into_iter()
+            .map(|(n, s)| (n, s, system::WebSettings::default()))
+            .chain(web_states.into_iter().map(|(n, w)| (n, base.clone(), w)));
+        for (name, s, w) in all {
+            let mut objects = fixed(w);
+            objects.extend(tailnet(w));
             objects.extend(route_objects(&other).objects);
             objects.extend(route_objects(&s).objects);
             if name == "service_added" {
