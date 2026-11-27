@@ -4195,8 +4195,6 @@ mod tests {
             // A domain moving to the tunnel, on it, and (as base) back.
             ("tunnel_switching", shop(&|s| s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into())),
             ("tunnel_on", shop(&|s| s.domains[0].tunnel = pyo_proto::TUNNEL_ON.into())),
-            // PROXY protocol on (the fixed client policies, below).
-            ("proxy_protocol", shop(&|_| {})),
         ];
         // A third service, new on the cluster, with a plain HTTP domain.
         let mut added = spec(vec![domain("new.example.com", "http", "", false)]);
@@ -4221,13 +4219,6 @@ mod tests {
         for (name, s) in states {
             let mut objects = fixed.clone();
             objects.push(tailnet.clone());
-            if name == "proxy_protocol" {
-                let pp = system::WebSettings { proxy_protocol: true, ..Default::default() };
-                for o in objects.iter_mut().filter(|o| o["kind"] == "ClientTrafficPolicy") {
-                    let https = o["metadata"]["name"] == "pyo-https";
-                    *o = system::client_policy(https, pp);
-                }
-            }
             objects.extend(route_objects(&other).objects);
             objects.extend(route_objects(&s).objects);
             if name == "service_added" {

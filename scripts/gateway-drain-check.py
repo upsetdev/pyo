@@ -37,11 +37,6 @@ STABLE = [
     ("waf_path_route", "waf_block"),
     ("service_added", "base"),
     ("base", "service_added"),
-    # Traffic paths: Tailnet off and on for a ts.net name, and a domain on
-    # the tunnel going from "switching" to "on".
-    ("base", "tailnet_on"),
-    ("tailnet_on", "base"),
-    ("tunnel_on", "tunnel_switching"),
 ]
 KNOWN = [
     ("waf_block", "base"),
@@ -51,11 +46,22 @@ KNOWN = [
     # the domain that stops), a domain moving to the tunnel or back drains
     # its own chain once, and PROXY protocol drains the whole listener.
     ("base", "tailnet_free_on"),
+    # Tailnet off and on with a service's ts.net name: its route's rate
+    # limit filter leaves and joins the tailnet listener, so that listener
+    # drains once. On the cluster Pyo runs on that includes Pyo's own
+    # tailnet names (the confirm says so).
+    ("base", "tailnet_on"),
+    ("tailnet_on", "base"),
+    # "switching" to "on": the domain's route policy is named after its
+    # route, which changes, so that domain drains once more.
+    ("tunnel_on", "tunnel_switching"),
     ("tunnel_switching", "base"),
     ("base", "tunnel_on"),
-    ("proxy_protocol", "base"),
-    ("base", "proxy_protocol"),
 ]
+# Not here: PROXY protocol. Pyo's client policies pick their Gateways by
+# label, which egctl x translate doesn't match, so it can't show them.
+# It's a listener filter: every connection on ports 80 and 443 drains
+# (checked by hand with targetRefs, docs/traffic-and-gateway-design.md §20).
 
 
 KNOWN_GROUPS = {"v1", "gateway.networking.k8s.io", "gateway.envoyproxy.io"}
