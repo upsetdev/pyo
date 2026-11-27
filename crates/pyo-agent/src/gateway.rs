@@ -572,10 +572,12 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         out.objects.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(family), "spec": policy }));
     }
     // The HTTPS Gateway's anchor: a route that always compresses (and
-    // carries the idle rate limit), answering one path with 404. So the
-    // compressor and rate limit filters are on each of its listeners'
-    // chains whether or not the service compresses, and compression on or
-    // off changes routes only (docs/traffic-and-gateway-design.md §11.2).
+    // carries the idle rate limit) and has a country rule, answering one
+    // path with 404. So the compressor, rate limit and geoip filters are on
+    // each of its listeners' chains whether or not the service compresses
+    // or has country rules, and compression on or off, or a first or last
+    // country rule, changes routes only (docs/traffic-and-gateway-design.md
+    // §11.2). The shared :80 has its own (`ensure_once`).
     if !holders.is_empty() {
         let name = system::anchor_name(&base);
         out.objects.push(json!({
@@ -585,6 +587,10 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         out.objects.push(json!({
             "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(&name),
             "spec": system::anchor_policy_spec(&base),
+        }));
+        out.objects.push(json!({
+            "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "SecurityPolicy", "metadata": meta(&name),
+            "spec": system::anchor_security_spec(&base),
         }));
     }
 
@@ -749,8 +755,9 @@ fn older_form(o: &Value) -> Option<Vec<Value>> {
             }
             Some(out)
         }
-        // An HTTPS Gateway's anchor (the compressor filters): not there.
-        "HTTPRoute" | "BackendTrafficPolicy" if is_anchor(o) => Some(vec![]),
+        // An HTTPS Gateway's anchor (the compressor and geoip filters): not
+        // there.
+        "HTTPRoute" | "BackendTrafficPolicy" | "SecurityPolicy" if is_anchor(o) => Some(vec![]),
         "BackendTrafficPolicy"
             if o["spec"]["rateLimit"] == pyo_proto::firewall::idle_rate_limit() =>
         {
@@ -766,7 +773,7 @@ fn older_form(o: &Value) -> Option<Vec<Value>> {
     }
 }
 
-/// An HTTPS Gateway's anchor route or its policy (`<gateway>-anchor`).
+/// An HTTPS Gateway's anchor route or its policies (`<gateway>-anchor`).
 fn is_anchor(o: &Value) -> bool {
     let Some(gateway) = o["metadata"]["name"].as_str().and_then(|n| n.strip_suffix("-anchor")) else {
         return false;
@@ -774,6 +781,7 @@ fn is_anchor(o: &Value) -> bool {
     match o["kind"].as_str() {
         Some("HTTPRoute") => o["spec"]["rules"][0]["filters"][0]["extensionRef"]["name"] == system::NOT_FOUND_FILTER,
         Some("BackendTrafficPolicy") => o["spec"] == system::anchor_policy_spec(gateway),
+        Some("SecurityPolicy") => o["spec"] == system::anchor_security_spec(gateway),
         _ => false,
     }
 }
@@ -2441,17 +2449,15 @@ async fn ensure_once(client: &Client) -> anyhow::Result<()> {
             &Patch::Apply(system::waf_backend()),
         )
         .await?;
-    // The anchor routes' 404 (an install older than this agent refuses
-    // it: the anchors then wait, and nothing else does).
-    if let Err(e) = api_of(client, "HTTPRouteFilter")
-        .patch(system::NOT_FOUND_FILTER, &pp(), &Patch::Apply(system::not_found_filter()))
-        .await
-    {
+    // The anchor routes' 404, then the shared :80's anchor (an install
+    // older than this agent refuses them: the anchors then wait, and
+    // nothing else does).
+    if let Err(e) = write_anchors(client).await {
         if !crate::refused::is_refusal(&e) {
             return Err(e.into());
         }
         if first_time(&FILTER_REFUSED) {
-            tracing::warn!(error = %e, "the cluster's install refuses the anchor routes' filter (run the cluster's connect command)");
+            tracing::warn!(error = %e, "the cluster's install refuses the anchor routes or their filter (run the cluster's connect command)");
         }
     } else {
         settled(&FILTER_REFUSED);
@@ -2462,8 +2468,26 @@ async fn ensure_once(client: &Client) -> anyhow::Result<()> {
     write_web(client, web_settings(client).await?).await
 }
 
-/// The anchor routes' filter was refused (said once, and tried again once
-/// the install changes, [`ensure`]).
+/// The anchor routes' 404 filter, and the shared :80 listener's anchor
+/// (system.rs `http_anchor_objects`): its country rule keeps the geoip
+/// filter on the :80 chain, so no service's first or last country rule
+/// drops every plain HTTP connection there. The anchor goes only once
+/// its filter is there.
+async fn write_anchors(client: &Client) -> kube::Result<()> {
+    api_of(client, "HTTPRouteFilter")
+        .patch(system::NOT_FOUND_FILTER, &pp(), &Patch::Apply(system::not_found_filter()))
+        .await?;
+    for o in system::http_anchor_objects() {
+        let kind = o["kind"].as_str().unwrap_or_default();
+        api_of(client, kind)
+            .patch(system::HTTP_ANCHOR, &pp(), &Patch::Apply(&o))
+            .await?;
+    }
+    Ok(())
+}
+
+/// The anchor routes' filter or the shared :80's anchor was refused (said
+/// once, and tried again once the install changes, [`ensure`]).
 static FILTER_REFUSED: AtomicBool = AtomicBool::new(false);
 
 /// The websites' settings as they are.
@@ -4259,8 +4283,16 @@ mod tests {
         let anchor = find(&off, "HTTPRoute", "shop-web-anchor");
         assert_eq!(anchor["spec"], system::anchor_route_spec("shop-web", None));
         assert_eq!(find(&off, "BackendTrafficPolicy", "shop-web-anchor")["spec"], system::anchor_policy_spec("shop-web"));
-        // Not a route to the service: no firewall or WAF policy of its own.
-        assert!(!off.objects.iter().any(|o| o["kind"] == "SecurityPolicy" && o["metadata"]["name"] == "shop-web-anchor"));
+        // Not a route to the service: no WAF policy, and only the anchor's
+        // own country rule, whatever the service's firewall says.
+        assert!(!off.objects.iter().any(|o| o["kind"] == "EnvoyExtensionPolicy" && o["metadata"]["name"] == "shop-web-anchor"));
+        assert_eq!(find(&off, "SecurityPolicy", "shop-web-anchor")["spec"], system::anchor_security_spec("shop-web"));
+        let mut countries = s.clone();
+        countries.firewall = Some(Firewall {
+            rules: vec![pyo_proto::firewall::FirewallRule { id: "fwr_1".into(), action: "block".into(), operator: "in".into(), sources: vec!["RU".into()], limit: None }],
+            ..Default::default()
+        });
+        assert_eq!(find(&route_objects(&countries), "SecurityPolicy", "shop-web-anchor")["spec"], system::anchor_security_spec("shop-web"));
         s.compression = true;
         s.idle_timeout = Some(600);
         let on = route_objects(&s);
@@ -4284,6 +4316,7 @@ mod tests {
         // An older install: the anchor isn't written, nothing said.
         assert_eq!(older_form(anchor), Some(vec![]));
         assert_eq!(older_form(find(&off, "BackendTrafficPolicy", "shop-web-anchor")), Some(vec![]));
+        assert_eq!(older_form(find(&off, "SecurityPolicy", "shop-web-anchor")), Some(vec![]));
         // And a route policy loses what it doesn't know.
         let p = find(&on, "BackendTrafficPolicy", "shop-web-https-http");
         let older = older_form(p).unwrap();
@@ -4368,6 +4401,11 @@ mod tests {
             request: HeaderSet::default(),
         };
         let fw = |rules: Vec<FirewallRule>| move |s: &mut DeploySpec| s.firewall = Some(Firewall { rules: rules.clone(), ..Default::default() });
+        let behind = |rules: Vec<FirewallRule>| Firewall {
+            rules,
+            presets: [("cloudflare".to_owned(), vec!["173.245.48.0/20".to_owned()])].into_iter().collect(),
+            behind: Some("cloudflare".into()),
+        };
         let limited = rule("fwr_r", "rateLimit", "");
         let mut limited_more = limited.clone();
         limited_more.limit = Some(RateLimit { requests: 200, per: "minute".into() });
@@ -4431,6 +4469,14 @@ mod tests {
                 s.domains[0].tunnel = pyo_proto::TUNNEL_ON.into();
                 s.compression = true;
             })),
+            // Country rules where the visitor comes from X-Forwarded-For:
+            // behind a CDN, and through the tunnel.
+            ("behind", shop(&|s| s.firewall = Some(behind(vec![])))),
+            ("behind_country", shop(&|s| s.firewall = Some(behind(vec![rule("fwr_2", "block", "RU")])))),
+            ("tunnel_country", shop(&|s| {
+                s.domains[0].tunnel = pyo_proto::TUNNEL_ON.into();
+                s.firewall = Some(Firewall { rules: vec![rule("fwr_2", "block", "RU")], ..Default::default() });
+            })),
         ];
         // The listener settings (HTTP/3, TLS 1.3): the client policies.
         let web_states: Vec<(&str, system::WebSettings)> = vec![
@@ -4451,6 +4497,9 @@ mod tests {
                 system::client_policy(false, system::WebSettings { origin_pull: false, http3: false, tls13: false, ..w }),
                 system::client_policy(true, w),
             ]
+            .into_iter()
+            .chain(system::http_anchor_objects())
+            .collect::<Vec<_>>()
         };
         // The tailnet Gateway, with the certificate of the service's ts.net
         // name (it stays while the Tailnet switch is off) and Pyo's own

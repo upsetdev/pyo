@@ -576,9 +576,11 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
 
 /// The Gateway section's fixed objects in pyo-gateway, for the admission
 /// policy (CEL, joined with `||`): the 404 filter of the anchor routes,
-/// the tailnet Gateway's anchor route and its policy, and the policy on
-/// each of Pyo's own tailnet routes. Routes are compared field by field:
-/// the API server fills in defaults (a parent's group and kind).
+/// the tailnet Gateway's anchor route and its policy, the shared :80
+/// listener's anchor policy (its route passes as any route there does),
+/// and the policy on each of Pyo's own tailnet routes. Routes are compared
+/// field by field: the API server fills in defaults (a parent's group and
+/// kind).
 fn anchor_pinned() -> String {
     let gw = system::GATEWAY_NS;
     let mut out = vec![
@@ -602,6 +604,11 @@ fn anchor_pinned() -> String {
             "(request.resource.resource == 'backendtrafficpolicies' && variables.objName == '{name}' && (request.operation == 'DELETE' || object.spec == {spec}))",
             name = system::TAILNET_ANCHOR,
             spec = cel_literal(&system::anchor_policy_spec(system::TAILNET_GATEWAY)),
+        ),
+        format!(
+            "(request.resource.resource == 'securitypolicies' && variables.objName == '{name}' && (request.operation == 'DELETE' || object.spec == {spec}))",
+            name = system::HTTP_ANCHOR,
+            spec = cel_literal(&system::anchor_security_spec(system::HTTP_GATEWAY)),
         ),
     ];
     for (name, _, _) in system::TAILNET_OWN_ROUTES {
@@ -2628,6 +2635,12 @@ mod tests {
                 system::cel_literal(&system::tailnet_own_policy_spec(name))
             )));
         }
+        // The shared :80's anchor policy (its country rule), exactly.
+        assert!(pinned.contains(&format!(
+            "request.resource.resource == 'securitypolicies' && variables.objName == '{}' && (request.operation == 'DELETE' || object.spec == {})",
+            system::HTTP_ANCHOR,
+            system::cel_literal(&system::anchor_security_spec(system::HTTP_GATEWAY))
+        )));
         assert!(all.contains(&pinned));
         // The tailnet anchor is one of the tailnet's own names: no service's
         // route may take it.
