@@ -778,9 +778,17 @@ the request until the rotation is over.
 **A leaked token.** The secret changes on the first pass, at most 30 s
 after Rotate (the loop's interval). Nobody can connect with the old token
 after that. A connector already connected with it keeps its connections
-until the cut: about 1 to 2 minutes in a normal rollout (the rollout, plus
-up to 30 s for the next pass and a heartbeat after it), at most 5 minutes
-plus one pass. Before this change it was cut on the first pass.
+until the cut, at most 5 minutes plus one pass. Before this change it was
+cut on the first pass. In `update-traffic-e2e.sh fast --dev` (one server,
+2026-11-27) the old pods left Cloudflare 18 and 23 seconds after Rotate,
+and Pyo ended the rotation 40 seconds after it.
+
+Measured there: 8 of 3,234 requests to the two tunnel domains failed
+during Rotate, against 393 before. All were 503 from the origin side,
+within 0.3 s, while the first new connector had started and wasn't ready
+yet. No old connector had stopped then. Not confirmed: that cloudflared
+answers 503 before its remote routes arrive. The connector restart in the
+same run lost none.
 
 ### 6.5 Domain DNS checks
 
