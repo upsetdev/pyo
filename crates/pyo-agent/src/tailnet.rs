@@ -533,6 +533,7 @@ pub fn objects(
     statuses: &[ServerTailnet],
     servers: &[String],
     own_names: bool,
+    tls13: bool,
 ) -> (Vec<Value>, Option<Value>, TailnetHosting) {
     let holder = cert_server(statuses);
     let hosting = TailnetHosting {
@@ -563,7 +564,7 @@ pub fn objects(
     } else {
         Default::default()
     };
-    let mut objs = system::tailnet_objects(servers, &certs, &own);
+    let mut objs = system::tailnet_objects_with(servers, &certs, &own, tls13);
     objs.push(json!({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": { "name": system::TAILNET_WANTED, "namespace": system::GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
@@ -588,7 +589,9 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
             return;
         }
     };
-    let (objs, vip, _) = objects(wanted, &statuses, &servers, same_cluster);
+    // The websites' TLS minimum, as the public listeners have it.
+    let tls13 = crate::gateway::web_settings(kube).await.is_ok_and(|w| w.tls13);
+    let (objs, vip, _) = objects(wanted, &statuses, &servers, same_cluster, tls13);
     let image = own_image(kube).await;
     let key = serde_json::to_string(&(&objs, &vip, &image)).unwrap_or_default();
     if APPLIED
@@ -656,7 +659,7 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
         (system::TAILNET_SANDBOXES, own.sandboxes.is_some()),
     ] {
         if !on {
-            for kind in ["HTTPRoute", "Backend"] {
+            for kind in ["BackendTrafficPolicy", "HTTPRoute", "Backend"] {
                 let _ = crate::gateway::api_of_kind(kube, kind)
                     .delete(name, &DeleteParams::default())
                     .await;
@@ -840,7 +843,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let (objs, vip, hosting) = objects(&wanted, &statuses, &[], true);
+        let (objs, vip, hosting) = objects(&wanted, &statuses, &[], true, false);
         assert_eq!(
             hosting
                 .services
@@ -865,15 +868,24 @@ mod tests {
                 .any(|o| o["metadata"]["name"] == system::TAILNET_DASHBOARD.0
                     && o["kind"] == "HTTPRoute")
         );
+        // With the idle rate limit services' ts.net routes carry, so the
+        // Tailnet switch never changes the tailnet HTTPS chain.
+        assert!(objs.iter().any(|o| o["metadata"]["name"] == system::TAILNET_DASHBOARD.0
+            && o["kind"] == "BackendTrafficPolicy"));
+        assert!(objs.iter().any(|o| o["metadata"]["name"] == system::TAILNET_ANCHOR && o["kind"] == "HTTPRoute"));
+        // The websites' TLS minimum.
+        let (objs13, _, _) = objects(&wanted, &statuses, &[], true, true);
+        let ctp = objs13.iter().find(|o| o["kind"] == "ClientTrafficPolicy").unwrap();
+        assert_eq!(ctp["spec"]["tls"]["minVersion"], "1.3");
         // Another cluster: no routes of Pyo's own.
-        let (objs, _, _) = objects(&wanted, &statuses, &[], false);
+        let (objs, _, _) = objects(&wanted, &statuses, &[], false, false);
         assert!(
             !objs
                 .iter()
                 .any(|o| o["metadata"]["name"] == system::TAILNET_DASHBOARD.0)
         );
         // Nothing hosted: no VIPs' Service.
-        let (_, vip, _) = objects(&TailnetWanted::default(), &statuses, &[], false);
+        let (_, vip, _) = objects(&TailnetWanted::default(), &statuses, &[], false, false);
         assert!(vip.is_none());
     }
 }

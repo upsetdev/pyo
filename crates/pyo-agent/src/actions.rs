@@ -64,6 +64,9 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         Command::SetWebProxyProtocol { on } => {
             crate::gateway::set_web_proxy_protocol(&agent.kube, on).await
         }
+        Command::SetWebSettings { http3, tls13 } => {
+            crate::gateway::set_web_settings(&agent.kube, http3, tls13).await
+        }
         Command::SyncFirewall(sync) => crate::firewall::sync(agent, *sync).await,
         Command::SyncRoutes(target) => crate::gateway::sync_routes(agent, &target).await,
         Command::ApplyBundle { mut bundle, prune } => {

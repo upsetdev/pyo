@@ -97,6 +97,9 @@ pub fn extension_policies() -> ApiResource {
         "envoyextensionpolicies",
     )
 }
+pub fn route_filters() -> ApiResource {
+    resource("gateway.envoyproxy.io", "v1alpha1", "HTTPRouteFilter", "httproutefilters")
+}
 fn certificates() -> ApiResource {
     resource("cert-manager.io", "v1", "Certificate", "certificates")
 }
@@ -555,14 +558,34 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         let rate = rate
             .as_ref()
             .filter(|_| !plain || pyo_proto::firewall::http_rate_limits(&fw));
-        let mut spec = json!({
+        let mut policy = json!({
             "targetRefs": route_refs(routes),
             "rateLimit": rate.cloned().unwrap_or_else(pyo_proto::firewall::idle_rate_limit),
         });
         if !on_tailnet && !plain {
-            spec["responseOverride"] = system::firewall_response_override();
+            policy["responseOverride"] = system::firewall_response_override();
         }
-        out.objects.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(family), "spec": spec }));
+        // The cluster's compression (HTTPS only: the shared :80's filters
+        // are every service's) and idle timeout. Routes only: the anchor
+        // keeps the compressor filters on every HTTPS chain.
+        let policy = system::with_route_settings(policy, spec.compression && !plain, spec.idle_timeout);
+        out.objects.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(family), "spec": policy }));
+    }
+    // The HTTPS Gateway's anchor: a route that always compresses (and
+    // carries the idle rate limit), answering one path with 404. So the
+    // compressor and rate limit filters are on each of its listeners'
+    // chains whether or not the service compresses, and compression on or
+    // off changes routes only (docs/traffic-and-gateway-design.md §11.2).
+    if !holders.is_empty() {
+        let name = system::anchor_name(&base);
+        out.objects.push(json!({
+            "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(&name),
+            "spec": system::anchor_route_spec(&base, None),
+        }));
+        out.objects.push(json!({
+            "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(&name),
+            "spec": system::anchor_policy_spec(&base),
+        }));
     }
 
     // Behind a CDN: its HTTPS listeners read the visitor from what the CDN
@@ -726,14 +749,32 @@ fn older_form(o: &Value) -> Option<Vec<Value>> {
             }
             Some(out)
         }
+        // An HTTPS Gateway's anchor (the compressor filters): not there.
+        "HTTPRoute" | "BackendTrafficPolicy" if is_anchor(o) => Some(vec![]),
         "BackendTrafficPolicy"
             if o["spec"]["rateLimit"] == pyo_proto::firewall::idle_rate_limit() =>
         {
             let mut o = o.clone();
-            o["spec"].as_object_mut()?.remove("rateLimit");
+            let spec = o["spec"].as_object_mut()?;
+            spec.remove("rateLimit");
+            // The Gateway section's route settings, which it doesn't know.
+            spec.remove("compressor");
+            spec.remove("timeout");
             Some(o["spec"].get("responseOverride").into_iter().map(|_| o.clone()).collect())
         }
         _ => None,
+    }
+}
+
+/// An HTTPS Gateway's anchor route or its policy (`<gateway>-anchor`).
+fn is_anchor(o: &Value) -> bool {
+    let Some(gateway) = o["metadata"]["name"].as_str().and_then(|n| n.strip_suffix("-anchor")) else {
+        return false;
+    };
+    match o["kind"].as_str() {
+        Some("HTTPRoute") => o["spec"]["rules"][0]["filters"][0]["extensionRef"]["name"] == system::NOT_FOUND_FILTER,
+        Some("BackendTrafficPolicy") => o["spec"] == system::anchor_policy_spec(gateway),
+        _ => false,
     }
 }
 
@@ -878,6 +919,7 @@ fn api_of(client: &Client, kind: &str) -> Api<DynamicObject> {
         "SecurityPolicy" => security_policies(),
         "BackendTrafficPolicy" => backend_policies(),
         "EnvoyExtensionPolicy" => extension_policies(),
+        "HTTPRouteFilter" => route_filters(),
         _ => client_policies(),
     };
     Api::namespaced_with(client.clone(), GATEWAY_NS, &ar)
@@ -1104,7 +1146,9 @@ pub async fn apply(
             // and it's said.
             Err(e) if older.is_some() && crate::refused::is_refusal(&e) => {
                 tracing::warn!(error = %e, kind = %kind, name = %name, "the install is older than the agent: written as it had it");
-                if !notes.iter().any(|n| n == OLDER_INSTALL) {
+                // The anchor changes nothing a visitor sees until compression
+                // is on, which the API refuses before the install is current.
+                if !is_anchor(o) && !notes.iter().any(|n| n == OLDER_INSTALL) {
                     notes.push(OLDER_INSTALL.into());
                 }
                 for o in older.into_iter().flatten() {
@@ -1180,8 +1224,9 @@ pub async fn apply(
 #[derive(Clone, Default)]
 pub struct RouteState(std::sync::Arc<RouteStateInner>);
 
-/// A service's newest routes revision, with its domains and request timeout.
-type Newest = (i64, Vec<DomainSpec>, Option<u32>);
+/// A service's newest routes revision, with its domains, request timeout,
+/// compression and idle timeout.
+type Newest = (i64, Vec<DomainSpec>, Option<u32>, bool, Option<u32>);
 
 #[derive(Default)]
 pub struct RouteStateInner {
@@ -1206,9 +1251,11 @@ impl RouteState {
     pub fn settle(&self, spec: &mut DeploySpec) {
         let mut newest = self.0.newest.lock().unwrap_or_else(|e| e.into_inner());
         match newest.get(&spec.service.service_id) {
-            Some((revision, domains, timeout)) if *revision > spec.routes_revision => {
+            Some((revision, domains, timeout, compression, idle)) if *revision > spec.routes_revision => {
                 spec.domains = domains.clone();
                 spec.request_timeout = *timeout;
+                spec.compression = *compression;
+                spec.idle_timeout = *idle;
                 spec.routes_revision = *revision;
             }
             _ => {
@@ -1218,6 +1265,8 @@ impl RouteState {
                         spec.routes_revision,
                         spec.domains.clone(),
                         spec.request_timeout,
+                        spec.compression,
+                        spec.idle_timeout,
                     ),
                 );
             }
@@ -1232,6 +1281,7 @@ pub fn target_spec(t: &pyo_proto::FirewallTarget, waf: bool) -> anyhow::Result<D
     Ok(serde_json::from_value(json!({
         "deploymentId": "", "service": t.service, "projectId": t.project_id, "image": "", "replicas": 0, "env": [],
         "ports": t.ports, "domains": t.domains, "routesRevision": t.routes_revision, "requestTimeout": t.request_timeout,
+        "compression": t.compression, "idleTimeout": t.idle_timeout,
         "resources": { "cpuRequest": 0, "cpuLimit": 0, "memoryRequest": 0, "memoryLimit": 0 },
         "healthCheck": { "type": "none", "path": "", "port": 0, "command": "", "initialDelaySeconds": 0, "periodSeconds": 0 },
         "volumes": [], "timeoutSeconds": 0, "networkIsolation": t.network_isolation, "firewall": t.firewall,
@@ -2391,13 +2441,32 @@ async fn ensure_once(client: &Client) -> anyhow::Result<()> {
             &Patch::Apply(system::waf_backend()),
         )
         .await?;
-    // Origin pull and PROXY protocol stay as set; visitors are placed by
-    // their connection (an older install's X-Forwarded-For goes).
+    // The anchor routes' 404 (an install older than this agent refuses
+    // it: the anchors then wait, and nothing else does).
+    if let Err(e) = api_of(client, "HTTPRouteFilter")
+        .patch(system::NOT_FOUND_FILTER, &pp(), &Patch::Apply(system::not_found_filter()))
+        .await
+    {
+        if !crate::refused::is_refusal(&e) {
+            return Err(e.into());
+        }
+        if first_time(&FILTER_REFUSED) {
+            tracing::warn!(error = %e, "the cluster's install refuses the anchor routes' filter (run the cluster's connect command)");
+        }
+    } else {
+        settled(&FILTER_REFUSED);
+    }
+    // Origin pull, PROXY protocol, HTTP/3 and the TLS minimum stay as set;
+    // visitors are placed by their connection (an older install's
+    // X-Forwarded-For goes).
     write_web(client, web_settings(client).await?).await
 }
 
+/// The anchor routes' filter was refused (said once).
+static FILTER_REFUSED: AtomicBool = AtomicBool::new(false);
+
 /// The websites' settings as they are.
-async fn web_settings(client: &Client) -> anyhow::Result<system::WebSettings> {
+pub async fn web_settings(client: &Client) -> anyhow::Result<system::WebSettings> {
     let https = api_of(client, "ClientTrafficPolicy")
         .get_opt("pyo-https")
         .await?;
@@ -2405,10 +2474,17 @@ async fn web_settings(client: &Client) -> anyhow::Result<system::WebSettings> {
         .as_ref()
         .map(|p| p.data["spec"].clone())
         .unwrap_or_default();
-    Ok(system::WebSettings {
+    Ok(web_settings_of(&spec))
+}
+
+/// The websites' settings in `pyo-https`'s spec.
+pub fn web_settings_of(spec: &Value) -> system::WebSettings {
+    system::WebSettings {
         origin_pull: spec["tls"]["clientValidation"].is_object(),
         proxy_protocol: spec["proxyProtocol"].is_object(),
-    })
+        http3: spec["http3"].is_object(),
+        tls13: spec["tls"]["minVersion"] == "1.3",
+    }
 }
 
 async fn write_web(client: &Client, w: system::WebSettings) -> anyhow::Result<()> {
@@ -2439,6 +2515,16 @@ async fn write_web(client: &Client, w: system::WebSettings) -> anyhow::Result<()
         });
         rewrite_cdn_policy(&mut o, w);
         write_client_policy(&policies, &name, &o).await?;
+    }
+    // The tailnet listeners' TLS minimum, while they're there (tailnet.rs
+    // writes them with the same).
+    if policies.get_opt(system::TAILNET_GATEWAY).await?.is_some() {
+        let o = json!({
+            "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy",
+            "metadata": { "name": system::TAILNET_GATEWAY, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
+            "spec": system::tailnet_client_policy_for(w.tls13),
+        });
+        write_client_policy(&policies, system::TAILNET_GATEWAY, &o).await?;
     }
     Ok(())
 }
@@ -2601,6 +2687,48 @@ pub async fn set_web_proxy_protocol(client: &Client, on: bool) -> anyhow::Result
     } else {
         "Websites no longer read PROXY protocol".into()
     })
+}
+
+/// The Gateway section's listener settings: HTTP/3 next to HTTPS, and TLS
+/// 1.3 only. Unset ones stay. HTTP/3 needs UDP port 443 free of every
+/// other Service on the servers.
+pub async fn set_web_settings(
+    client: &Client,
+    http3: Option<bool>,
+    tls13: Option<bool>,
+) -> anyhow::Result<String> {
+    if !installed(client).await {
+        anyhow::bail!("The gateway isn't installed on this cluster yet. Try again in a minute.");
+    }
+    let w = web_settings(client).await?;
+    let want = system::WebSettings {
+        http3: http3.unwrap_or(w.http3),
+        tls13: tls13.unwrap_or(w.tls13),
+        ..w
+    };
+    if want.http3 && !w.http3 {
+        port_free(client, "UDP", 443)
+            .await
+            .map_err(|why| anyhow::anyhow!("HTTP/3 needs UDP port 443: {why}"))?;
+    }
+    write_web(client, want).await?;
+    Ok(web_settings_said(w, want))
+}
+
+/// What a change of the listener settings did, in a line.
+pub fn web_settings_said(was: system::WebSettings, now: system::WebSettings) -> String {
+    let mut said = vec![];
+    if was.http3 != now.http3 {
+        said.push(if now.http3 { "HTTP/3 is on" } else { "HTTP/3 is off" });
+    }
+    if was.tls13 != now.tls13 {
+        said.push(if now.tls13 { "HTTPS takes TLS 1.3 only" } else { "HTTPS takes TLS 1.2 and 1.3" });
+    }
+    if said.is_empty() {
+        "The websites' settings were already so".into()
+    } else {
+        said.join(". ")
+    }
 }
 
 /// Require a client certificate from these CAs on this cluster's HTTPS, or
@@ -3183,7 +3311,7 @@ mod tests {
         let types: Vec<&str> = f["spec"]["rules"][1]["filters"].as_array().unwrap().iter().filter_map(|x| x["type"].as_str()).collect();
         assert_eq!(types, ["ResponseHeaderModifier", "RequestHeaderModifier"]);
         // Its own routes get the service's firewall and WAF like the others.
-        let names: Vec<&str> = r.objects.iter().filter(|o| o["kind"] == "HTTPRoute").filter_map(|o| o["metadata"]["name"].as_str()).collect();
+        let names: Vec<&str> = r.objects.iter().filter(|o| o["kind"] == "HTTPRoute" && !is_anchor(o)).filter_map(|o| o["metadata"]["name"].as_str()).collect();
         assert_eq!(names.len(), 7, "{names:?}");
     }
 
@@ -3314,7 +3442,7 @@ mod tests {
         let timeouts = |r: &Routes| {
             r.objects
                 .iter()
-                .filter(|o| o["kind"] == "HTTPRoute")
+                .filter(|o| o["kind"] == "HTTPRoute" && !is_anchor(o))
                 .map(|o| {
                     (
                         o["metadata"]["name"].as_str().unwrap().to_owned(),
@@ -3373,7 +3501,7 @@ mod tests {
         let routes: Vec<_> = r
             .objects
             .iter()
-            .filter(|o| o["kind"] == "HTTPRoute")
+            .filter(|o| o["kind"] == "HTTPRoute" && !is_anchor(o))
             .map(|o| o["metadata"]["name"].as_str().unwrap())
             .collect();
         assert_eq!(
@@ -3434,7 +3562,8 @@ mod tests {
                     && !o["metadata"]["name"]
                         .as_str()
                         .unwrap()
-                        .ends_with("-redirect"))
+                        .ends_with("-redirect")
+                    && !is_anchor(o))
                 .all(|o| o["spec"]["rules"][0]["timeouts"]["request"] == "300s")
         );
         // A route written differently is another version.
@@ -4105,6 +4234,99 @@ mod tests {
         );
     }
 
+    /// The Gateway section on a service's routes: an anchor on its HTTPS
+    /// Gateway that always compresses; with compression on, the same three
+    /// compressors on every HTTPS route's policy, none on plain HTTP; the
+    /// idle timeout on every route's policy. Off, the policies are as they
+    /// were before the section.
+    #[test]
+    fn compression_and_idle_timeout_ride_on_route_policies() {
+        let mut s = spec(vec![
+            domain("shop.example.com", "http", "letsencrypt", false),
+            domain("plain.example.com", "http", "", false),
+            domain("shop.tail1234.ts.net", "http", "", false),
+            DomainSpec { tunnel: pyo_proto::TUNNEL_ON.into(), ..domain("t.example.com", "http", "custom", false) },
+        ]);
+        let policies = |r: &Routes| -> Vec<Value> {
+            r.objects.iter().filter(|o| o["kind"] == "BackendTrafficPolicy" && !is_anchor(o)).cloned().collect()
+        };
+        let off = route_objects(&s);
+        for p in policies(&off) {
+            assert!(p["spec"].get("compressor").is_none() && p["spec"].get("timeout").is_none(), "{p}");
+        }
+        // The anchor: on the service's HTTPS Gateway, all its listeners.
+        let anchor = find(&off, "HTTPRoute", "shop-web-anchor");
+        assert_eq!(anchor["spec"], system::anchor_route_spec("shop-web", None));
+        assert_eq!(find(&off, "BackendTrafficPolicy", "shop-web-anchor")["spec"], system::anchor_policy_spec("shop-web"));
+        // Not a route to the service: no firewall or WAF policy of its own.
+        assert!(!off.objects.iter().any(|o| o["kind"] == "SecurityPolicy" && o["metadata"]["name"] == "shop-web-anchor"));
+        s.compression = true;
+        s.idle_timeout = Some(600);
+        let on = route_objects(&s);
+        let names = |r: &Routes| -> Vec<(String, String)> {
+            r.objects.iter().map(|o| (o["kind"].as_str().unwrap().to_owned(), o["metadata"]["name"].as_str().unwrap().to_owned())).collect()
+        };
+        assert_eq!(names(&on), names(&off), "the same objects: routes only");
+        for p in policies(&on) {
+            let name = p["metadata"]["name"].as_str().unwrap();
+            let plain = name.starts_with("shop-web-http-");
+            assert_eq!(p["spec"]["compressor"].is_array(), !plain, "{name}");
+            if !plain {
+                assert_eq!(p["spec"]["compressor"], system::compressors(), "{name}");
+            }
+            assert_eq!(p["spec"]["timeout"], json!({ "http": { "streamIdleTimeout": "600s" } }), "{name}");
+        }
+        assert!(policies(&on).iter().any(|p| p["metadata"]["name"].as_str().unwrap().starts_with("tn--")), "ts.net routes too");
+        // No HTTPS Gateway, no anchor.
+        let plain_only = spec(vec![domain("plain.example.com", "http", "", false)]);
+        assert!(!route_objects(&plain_only).objects.iter().any(is_anchor));
+        // An older install: the anchor isn't written, nothing said.
+        assert_eq!(older_form(anchor), Some(vec![]));
+        assert_eq!(older_form(find(&off, "BackendTrafficPolicy", "shop-web-anchor")), Some(vec![]));
+        // And a route policy loses what it doesn't know.
+        let p = find(&on, "BackendTrafficPolicy", "shop-web-https-http");
+        let older = older_form(p).unwrap();
+        assert!(older.iter().all(|o| o["spec"].get("compressor").is_none() && o["spec"].get("timeout").is_none()));
+    }
+
+    /// A routes sync and a deploy racing each other end on the newest
+    /// route settings, as on the newest domains.
+    #[test]
+    fn the_newest_route_settings_win() {
+        let state = RouteState::default();
+        let mut newer = spec(vec![domain("shop.example.com", "http", "", false)]);
+        newer.routes_revision = 5;
+        newer.compression = true;
+        newer.idle_timeout = Some(900);
+        state.settle(&mut newer.clone());
+        let mut older = spec(vec![domain("shop.example.com", "http", "", false)]);
+        older.routes_revision = 4;
+        state.settle(&mut older);
+        assert!(older.compression);
+        assert_eq!(older.idle_timeout, Some(900));
+        assert_eq!(older.routes_revision, 5);
+    }
+
+    /// The listener settings read back from pyo-https.
+    #[test]
+    fn web_settings_read_back() {
+        for w in [
+            system::WebSettings::default(),
+            system::WebSettings { http3: true, ..Default::default() },
+            system::WebSettings { tls13: true, origin_pull: true, ..Default::default() },
+            system::WebSettings { proxy_protocol: true, http3: true, tls13: true, origin_pull: false },
+        ] {
+            assert_eq!(web_settings_of(&system::client_policy_spec(true, w)), w);
+        }
+        let was = system::WebSettings::default();
+        assert_eq!(web_settings_said(was, system::WebSettings { http3: true, ..was }), "HTTP/3 is on");
+        assert_eq!(
+            web_settings_said(system::WebSettings { http3: true, ..was }, system::WebSettings { tls13: true, ..was }),
+            "HTTP/3 is off. HTTPS takes TLS 1.3 only"
+        );
+        assert_eq!(web_settings_said(was, was), "The websites' settings were already so");
+    }
+
     /// Writes the gateway objects of a cluster before and after each kind
     /// of firewall and WAF change, one JSON file (a list of objects) per
     /// state, into `PYO_DRAIN_SCENARIOS`, for
@@ -4268,7 +4490,7 @@ mod tests {
             let r = route_objects(&changed);
             assert_eq!(names(&r), names(&before), "{what}");
             // Each targets its family's routes, and only those.
-            for o in r.objects.iter().filter(|o| o["kind"] == "BackendTrafficPolicy" || o["kind"] == "EnvoyExtensionPolicy") {
+            for o in r.objects.iter().filter(|o| (o["kind"] == "BackendTrafficPolicy" || o["kind"] == "EnvoyExtensionPolicy") && !is_anchor(o)) {
                 let name = o["metadata"]["name"].as_str().unwrap();
                 let targets: Vec<&str> = o["spec"]["targetRefs"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
                 let family: Vec<&str> = r
@@ -5301,6 +5523,8 @@ mod tests {
                 domains: s.domains,
                 routes_revision: revision,
                 request_timeout: None,
+                compression: false,
+                idle_timeout: None,
                 network_isolation: false,
                 firewall: Default::default(),
                 waf: None,
@@ -5637,13 +5861,13 @@ mod tests {
 
         // The gateway's settings (origin pull, PROXY protocol): the shared
         // policies as 0.5.4 lists them, and the CDN's follows.
-        write_web(&client, system::WebSettings { origin_pull: true, proxy_protocol: true })
+        write_web(&client, system::WebSettings { origin_pull: true, proxy_protocol: true, ..Default::default() })
             .await
             .expect("the gateway's settings");
         for (https, name) in [(false, "pyo-http"), (true, "pyo-https")] {
             let p = kube.get(&at("ClientTrafficPolicy", name)).expect(name);
             assert!(p["spec"].get("headers").is_none(), "{p}");
-            let w = system::WebSettings { origin_pull: https, proxy_protocol: true };
+            let w = system::WebSettings { origin_pull: https, proxy_protocol: true, ..Default::default() };
             assert_eq!(Some(p), without_headers(&system::client_policy(https, w)).map(|mut o| {
                 o["metadata"]["resourceVersion"] = json!("1");
                 o["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
