@@ -303,6 +303,8 @@ async fn target(
             domains: specs,
             routes_revision: revision,
             request_timeout: request_timeout(&timeout),
+            compression: false,
+            idle_timeout: None,
             network_isolation: isolation,
             firewall,
             waf,
@@ -343,28 +345,64 @@ pub async fn refresh(db: &PgPool, command: &mut Value) -> anyhow::Result<()> {
 }
 
 /// One spec or target with its service's current domains, request
-/// timeout and revision.
+/// timeout and revision, and its cluster's route settings (the Gateway
+/// section's compression and timeout defaults).
 async fn current(db: &PgPool, o: &mut Value) -> anyhow::Result<()> {
     let Some(id) = o["service"]["serviceId"].as_str() else {
         return Ok(());
     };
-    let row: Option<(Value, i64, bool)> = sqlx::query_as(
+    let row: Option<(Value, i64, bool, i32, bool, i32)> = sqlx::query_as(
         "SELECT jsonb_build_object('domains', coalesce(a.spec->'domains', '[]'), 'requestTimeout', a.spec->'requestTimeout'), a.routes_revision,
-                coalesce(c.tailnet_web, true)
+                coalesce(c.tailnet_web, true), coalesce(c.request_timeout, 300), coalesce(c.compression, false), coalesce(c.idle_timeout, 3600)
            FROM pyo.services a LEFT JOIN pyo.clusters c ON c.id = a.cluster_id WHERE a.id = $1",
     )
     .bind(id)
     .fetch_optional(db)
     .await?;
-    if let Some((routing, revision, tailnet_web)) = row {
+    if let Some((routing, revision, tailnet_web, request_default, compression, idle_default)) = row {
         let mut conn = db.acquire().await?;
         let mut specs = crate::paths::specs(&mut conn, id, &routing["domains"]).await?;
         served(&mut specs, tailnet_web);
+        let d = Defaults::of(request_default, compression, idle_default);
         o["domains"] = serde_json::to_value(specs).unwrap_or(json!([]));
-        o["requestTimeout"] = json!(request_timeout(&routing));
+        o["requestTimeout"] = json!(d.request_timeout(request_timeout(&routing)));
+        o["compression"] = json!(d.compression);
+        o["idleTimeout"] = json!(d.idle_timeout);
         o["routesRevision"] = json!(revision);
     }
     Ok(())
+}
+
+/// A cluster's route settings for its services (the Gateway section).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Defaults {
+    /// The request timeout for services without their own: None while it's
+    /// Pyo's own default ([`pyo_proto::system::REQUEST_TIMEOUT_SECS`]), so
+    /// routes are written as before.
+    pub request_default: Option<u32>,
+    pub compression: bool,
+    /// None while it's the client policies' 1 hour: routes carry none.
+    pub idle_timeout: Option<u32>,
+}
+
+impl Defaults {
+    /// From the cluster's columns.
+    pub fn of(request_default: i32, compression: bool, idle: i32) -> Self {
+        let request = u32::try_from(request_default)
+            .unwrap_or(pyo_proto::system::REQUEST_TIMEOUT_SECS)
+            .min(pyo_proto::system::MAX_REQUEST_TIMEOUT_SECS);
+        let idle = u32::try_from(idle).unwrap_or(pyo_proto::system::IDLE_TIMEOUT_SECS);
+        Defaults {
+            request_default: (request != pyo_proto::system::REQUEST_TIMEOUT_SECS).then_some(request),
+            compression,
+            idle_timeout: (idle != pyo_proto::system::IDLE_TIMEOUT_SECS).then_some(idle),
+        }
+    }
+
+    /// A service's request timeout: its own, else the cluster's default.
+    pub fn request_timeout(self, own: Option<u32>) -> Option<u32> {
+        own.or(self.request_default)
+    }
 }
 
 /// Its domains route now: each one whose DNS checks out is active, and its

@@ -357,6 +357,8 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> ApiRe
             domains: crate::routes::domain_specs(&domains),
             routes_revision,
             request_timeout: crate::routes::request_timeout(&timeout),
+            compression: false,
+            idle_timeout: None,
             network_isolation: isolation,
             firewall,
             waf: waf_for(tx, engine, &service_id).await?,

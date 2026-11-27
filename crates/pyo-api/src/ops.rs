@@ -3105,6 +3105,20 @@ pub(crate) enum Op {
         #[serde(default)]
         confirm: bool,
     },
+    /// A cluster's gateway settings. Unset fields stay as they are. `http3`: HTTP/3 on UDP port 443 next to HTTPS. It needs public ports on and UDP port 443 free on the servers, and the servers' firewalls must let UDP 443 in. Turning it on or off drops open connections on each server's public ports once, one server at a time. `tlsMin`: "1.2" or "1.3". Changing it drops every open HTTPS connection once. `compression`: Zstd, Brotli and Gzip on services' HTTPS domains. `requestTimeout` (seconds, 1 to 3600, or 0 for no limit) and `idleTimeout` (how long a WebSocket or stream may stay quiet, 60 to 86400 seconds, at least the request timeout): the defaults for services without their own. Compression and the defaults change routes only, without dropping connections. `drops` in the answer says whether open connections drop once. Team owners and admins.
+    SetClusterGateway {
+        cluster_id: String,
+        #[serde(default)]
+        http3: Option<bool>,
+        #[serde(default)]
+        compression: Option<bool>,
+        #[serde(default)]
+        tls_min: Option<String>,
+        #[serde(default)]
+        request_timeout: Option<u32>,
+        #[serde(default)]
+        idle_timeout: Option<u32>,
+    },
     /// Give the cluster's Cloudflare Tunnel a new token and a new certificate, and drop its old connections. Team owners and admins.
     RotateTunnelToken { cluster_id: String },
     /// Create a project and its services from a Docker Compose plan (from `POST /compose/preview`, edited if you like), and deploy them in order.
@@ -3684,6 +3698,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SetClusterTraffic { .. }
         | Op::RemoveClusterTunnel { .. }
         | Op::SetClusterPaths { .. }
+        | Op::SetClusterGateway { .. }
         | Op::RotateTunnelToken { .. }
         | Op::SetClusterFreeDomainAddress { .. } => ("Clusters", "cl"),
         Op::AddFirewallRule { .. }
@@ -8949,6 +8964,23 @@ async fn apply(
                 confirm,
             };
             crate::traffic_paths::set(s, tx, user, &cluster_id, ask, wake).await
+        }
+        Op::SetClusterGateway {
+            cluster_id,
+            http3,
+            compression,
+            tls_min,
+            request_timeout,
+            idle_timeout,
+        } => {
+            let ask = crate::gateway_settings::Ask {
+                http3,
+                compression,
+                tls_min,
+                request_timeout,
+                idle_timeout,
+            };
+            crate::gateway_settings::set(tx, user, &cluster_id, ask, wake).await
         }
         Op::RotateTunnelToken { cluster_id } => {
             crate::cloudflare::tunnel_ops::rotate(tx, user, &cluster_id).await
