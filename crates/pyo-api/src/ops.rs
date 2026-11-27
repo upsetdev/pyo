@@ -2364,11 +2364,11 @@ pub(crate) enum Op {
     SetClusterTrafficMode { cluster_id: String, mode: String },
     /// Read the visitor's address from a PROXY protocol header on the
     /// cluster's websites (ports 80 and 443), for a cluster behind another
-    /// load balancer. Connections without one still work.
+    /// load balancer. Connections without one still work. Prefer setClusterPaths.
     SetClusterWebProxyProtocol { cluster_id: String, on: bool },
     /// Whether a cluster takes public traffic: the gateway answers on every
     /// server but build-only ones (ports 80 and 443, and public TCP and UDP
-    /// ports through it). Off: services are only reachable inside the cluster.
+    /// ports through it). Off: services are only reachable inside the cluster. Prefer setClusterPaths.
     SetClusterPublicTraffic { cluster_id: String, on: bool },
     /// Where the cluster's free domains (`<name>.<ip>.nip.io`) point: "public" (its public IP, for everyone) or "tailscale" (its Tailscale IP, only from the tailnet). With "tailscale", services are reachable from your tailnet on ports 80 and 443 whether or not the cluster takes public traffic. Free domains on it move to the new address in place, except ones on the public IP, which stay there while the cluster has one. By default it's public when the cluster takes public traffic and a server has its public IP itself (on a network card or as its ExternalIP), a load balancer gives it one, or its cloud maps one to it and Let's Encrypt reached it there. Behind NAT, it's Tailscale.
     SetClusterFreeDomainAddress { cluster_id: String, address: String },
@@ -3046,7 +3046,7 @@ pub(crate) enum Op {
         #[serde(default)]
         restore_records: bool,
     },
-    /// How a cluster takes web traffic: "public" (ports 80 and 443 on every server but build-only ones), "tailscale" (only from the tailnet, or only inside the cluster without Tailscale) or "tunnel" (through Cloudflare Tunnel, with no ports 80 and 443 open). For "tunnel", the team's Cloudflare token needs Cloudflare Tunnel:Edit and SSL and Certificates:Edit, and the cluster's install must be Pyo's (run its connect command first when it's older). Domains in zones of the tunnel's account move to the tunnel. Those with a DNS record Pyo didn't make wait for `setDomainTunnel` with `replace`. Pyo does the Cloudflare work in the background: the cluster's `tunnel` shows how it's going. Team owners and admins.
+    /// How a cluster takes web traffic: "public" (ports 80 and 443 on every server but build-only ones), "tailscale" (only from the tailnet, or only inside the cluster without Tailscale) or "tunnel" (through Cloudflare Tunnel, with no ports 80 and 443 open). For "tunnel", the team's Cloudflare token needs Cloudflare Tunnel:Edit and SSL and Certificates:Edit, and the cluster's install must be Pyo's (run its connect command first when it's older). Domains in zones of the tunnel's account move to the tunnel. Those with a DNS record Pyo didn't make wait for `setDomainTunnel` with `replace`. Pyo does the Cloudflare work in the background: the cluster's `tunnel` shows how it's going. Team owners and admins. Prefer setClusterPaths.
     SetClusterTraffic {
         cluster_id: String,
         mode: String,
@@ -3072,11 +3072,38 @@ pub(crate) enum Op {
         #[serde(default = "yes")]
         restore: bool,
     },
-    /// Remove a cluster's Cloudflare Tunnel: its routes, the DNS records Pyo made (with `restoreRecords`, the ones they replaced come back), the connector in the cluster, its certificate and the tunnel itself. Pick Public ports or Tailscale only for the cluster first. Team owners and admins.
+    /// Remove a cluster's Cloudflare Tunnel: its routes, the DNS records Pyo made (with `restoreRecords`, the ones they replaced come back), the connector in the cluster, its certificate and the tunnel itself. Pick Public ports or Tailscale only for the cluster first. Team owners and admins. Prefer setClusterPaths.
     RemoveClusterTunnel {
         cluster_id: String,
         #[serde(default = "yes")]
         restore_records: bool,
+    },
+    /// Turn a cluster's traffic paths on or off: public ports 80 and 443 (`public`), Cloudflare Tunnel (`tunnel`, with `defaultDomain` and `accountId` as for setClusterTraffic) and websites on the tailnet (`tailnet`: ts.net names and free domains on the servers' Tailscale addresses; the servers stay on the tailnet). Unset fields stay as they are. At least one path stays on. Each domain takes one path, and a domain whose path is off isn't served. When a path turned off still has domains, nothing changes: `status` is "confirm" and `domains` lists them, each with `outcome` "moves" or "stops". Send it again with `confirm` to go ahead. Turning public ports off with the tunnel on moves the domains in the tunnel's Cloudflare account to the tunnel first (`moveToTunnel`, on by default), and the ports close once every one of them is on it (`status` "moving"). Turning the tunnel off with public ports on switches its domains back first, then removes the tunnel at Cloudflare. `dashboardDrops`: switching Tailnet drops open connections to Pyo's dashboard on the tailnet once (the cluster Pyo runs on, with ts.net names). Team owners and admins.
+    SetClusterPaths {
+        cluster_id: String,
+        #[serde(default)]
+        public: Option<bool>,
+        #[serde(default)]
+        tunnel: Option<bool>,
+        #[serde(default)]
+        tailnet: Option<bool>,
+        /// TCP and UDP ports on the servers while public ports are off.
+        #[serde(default)]
+        public_ports: Option<bool>,
+        /// Read the visitor's address from a PROXY protocol header on ports 80 and 443. Saving drops open web connections once.
+        #[serde(default)]
+        proxy_protocol: Option<bool>,
+        #[serde(default)]
+        default_domain: Option<String>,
+        #[serde(default)]
+        account_id: Option<String>,
+        #[serde(default)]
+        move_to_tunnel: Option<bool>,
+        /// With turning the tunnel off: put back the records its domains replaced. On by default.
+        #[serde(default)]
+        restore_records: Option<bool>,
+        #[serde(default)]
+        confirm: bool,
     },
     /// Give the cluster's Cloudflare Tunnel a new token and a new certificate, and drop its old connections. Team owners and admins.
     RotateTunnelToken { cluster_id: String },
@@ -3656,6 +3683,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SetClusterPublicTraffic { .. }
         | Op::SetClusterTraffic { .. }
         | Op::RemoveClusterTunnel { .. }
+        | Op::SetClusterPaths { .. }
         | Op::RotateTunnelToken { .. }
         | Op::SetClusterFreeDomainAddress { .. } => ("Clusters", "cl"),
         Op::AddFirewallRule { .. }
@@ -5075,7 +5103,8 @@ async fn apply(
             require_role(tx, user, &team_id, Role::Admin).await?;
             // `public_traffic` follows `traffic` (a trigger keeps them in step).
             let name: String = sqlx::query_scalar(
-                "UPDATE pyo.clusters SET traffic = CASE WHEN $2 THEN 'public' ELSE 'tailscale' END WHERE id = $1 RETURNING name",
+                "UPDATE pyo.clusters SET traffic = CASE WHEN $2 THEN 'public' ELSE 'tailscale' END, public_ports = NULL, close_public_after = NULL
+                  WHERE id = $1 RETURNING name",
             )
             .bind(&cluster_id)
             .bind(on)
@@ -8894,6 +8923,33 @@ async fn apply(
             cluster_id,
             restore_records,
         } => crate::cloudflare::tunnel_ops::remove(tx, user, &cluster_id, restore_records, wake).await,
+        Op::SetClusterPaths {
+            cluster_id,
+            public,
+            tunnel,
+            tailnet,
+            public_ports,
+            proxy_protocol,
+            default_domain,
+            account_id,
+            move_to_tunnel,
+            restore_records,
+            confirm,
+        } => {
+            let ask = crate::traffic_paths::Ask {
+                public,
+                tunnel,
+                tailnet,
+                public_ports,
+                proxy_protocol,
+                default_domain,
+                account_id,
+                move_to_tunnel,
+                restore_records,
+                confirm,
+            };
+            crate::traffic_paths::set(s, tx, user, &cluster_id, ask, wake).await
+        }
         Op::RotateTunnelToken { cluster_id } => {
             crate::cloudflare::tunnel_ops::rotate(tx, user, &cluster_id).await
         }

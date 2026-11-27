@@ -422,6 +422,11 @@ async fn keep<C: Cloudflare + TunnelApi>(
     }
     records(s, cf, row, &target, zones, mark).await?;
     default_record(s, cf, row, &target, mark).await?;
+    // Public ports that wait for domains to move close once they have, and
+    // a tunnel turned off goes once its domains are back
+    // (traffic_paths.rs).
+    close_public(s, row).await?;
+    remove_when_back(s, row).await?;
 
     // 5. The agent's token.
     let agent_has = row.agent_status["tunnelId"].as_str();
@@ -939,6 +944,104 @@ async fn revert_one<C: Cloudflare + TunnelApi>(
     Ok(())
 }
 
+/// SQL: the cluster ($1) has a domain on its way to or from the tunnel,
+/// or waiting for "Replace and switch": `tunnel` "switching" (both paths
+/// answer for it).
+const SWITCHING: &str = "SELECT EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
+                  WHERE a.cluster_id = $1 AND NOT a.deleting AND d->>'tunnel' = 'switching')";
+
+/// Public ports asked to close while domains moved to the tunnel: closed
+/// (`traffic` 'tunnel') once none is still on its way, so no visitor of a
+/// moved domain meets a closed port. A domain waiting for "Replace and
+/// switch" holds it too. Whether they closed.
+pub(crate) async fn close_public(s: &AppState, row: &Row) -> ApiResult<bool> {
+    let waiting: bool = sqlx::query_scalar(
+        "SELECT close_public_after IS NOT NULL AND traffic = 'public' FROM pyo.clusters WHERE id = $1",
+    )
+    .bind(&row.cluster_id)
+    .fetch_optional(&s.db)
+    .await?
+    .unwrap_or(false);
+    if !waiting || row.state == "removing" {
+        return Ok(false);
+    }
+    let busy: bool = sqlx::query_scalar(SWITCHING)
+        .bind(&row.cluster_id)
+        .fetch_one(&s.db)
+        .await?;
+    if busy {
+        return Ok(false);
+    }
+    let mut tx = s.db.begin().await?;
+    let n = sqlx::query(
+        "UPDATE pyo.clusters SET traffic = 'tunnel', close_public_after = NULL
+          WHERE id = $1 AND close_public_after IS NOT NULL AND traffic = 'public'",
+    )
+    .bind(&row.cluster_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if n > 0 {
+        let name: String = sqlx::query_scalar("SELECT name FROM pyo.clusters WHERE id = $1")
+            .bind(&row.cluster_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        log_activity(
+            &mut tx,
+            &row.team_id,
+            "Pyo",
+            "cluster.updated",
+            "info",
+            &format!("Closed the public ports of {name}: its domains are on the Cloudflare Tunnel"),
+            json!({ "kind": "cluster", "id": row.cluster_id, "label": name }),
+            json!({ "clusterId": row.cluster_id }),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    if n > 0 {
+        s.wake(&row.cluster_id).await;
+    }
+    Ok(n > 0)
+}
+
+/// A tunnel turned off while public ports are on: removed once none of
+/// its domains is still switching back. Whether it was.
+pub(crate) async fn remove_when_back(s: &AppState, row: &Row) -> ApiResult<bool> {
+    let waiting: bool = sqlx::query_scalar(
+        "SELECT remove_when_back IS NOT NULL FROM pyo.cluster_tunnels WHERE cluster_id = $1 AND state <> 'removing'",
+    )
+    .bind(&row.cluster_id)
+    .fetch_optional(&s.db)
+    .await?
+    .unwrap_or(false);
+    if !waiting {
+        return Ok(false);
+    }
+    let busy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.dns_records r JOIN pyo.services a ON a.id = r.service_id
+                         WHERE a.cluster_id = $1 AND NOT a.deleting AND r.status = 'reverting')",
+    )
+    .bind(&row.cluster_id)
+    .fetch_one(&s.db)
+    .await?;
+    if busy {
+        return Ok(false);
+    }
+    let n = sqlx::query(
+        "UPDATE pyo.cluster_tunnels SET state = 'removing', remove_when_back = NULL, token_sent_at = NULL, updated_at = now()
+          WHERE cluster_id = $1 AND remove_when_back IS NOT NULL AND state <> 'removing'",
+    )
+    .bind(&row.cluster_id)
+    .execute(&s.db)
+    .await?
+    .rows_affected();
+    if n > 0 {
+        s.wake(&row.cluster_id).await;
+    }
+    Ok(n > 0)
+}
+
 /// A domain leaves the tunnel: no `tunnel`, and the certificate it had.
 /// A domain the tunnel answers for now: active, and an error from before
 /// (the direct DNS check's, say) no longer applies.
@@ -1439,6 +1542,8 @@ pub fn shown(row: &Value) -> Value {
         "accountId": row["accountId"], "accountName": row["accountName"],
         "tunnelId": row["tunnelId"], "tunnelName": row["tunnelName"],
         "defaultDomain": row["defaultDomain"], "portsPublic": row["portsPublic"],
+        // Turned off: removed once its domains are back on public ports.
+        "removeWhenBack": row["removeWhenBack"] == json!(true),
         "connectors": connectors,
         "colos": colos,
         "connections": connections.len(),
@@ -1482,7 +1587,7 @@ pub async fn one_shown(db: impl sqlx::PgExecutor<'_>, cluster_id: &str) -> ApiRe
 const SHOWN: &str = concat!(
     "SELECT t.cluster_id, jsonb_build_object(
         'state', t.state, 'error', t.error, 'accountId', t.account_id, 'accountName', t.account_name,
-        'tunnelId', t.tunnel_id, 'tunnelName', t.tunnel_name, 'defaultDomain', t.default_domain, 'portsPublic', t.ports_public,
+        'tunnelId', t.tunnel_id, 'tunnelName', t.tunnel_name, 'defaultDomain', t.default_domain, 'portsPublic', t.ports_public, 'removeWhenBack', t.remove_when_back IS NOT NULL,
         'cfStatus', t.cf_status, 'agentStatus', t.agent_status, 'young', t.created_at > now() - interval '5 minutes',
         'certificate', (SELECT jsonb_build_object('id', c.id, 'notAfter', pyo.ms(c.not_after)) FROM pyo.certificates c WHERE c.id = t.certificate_id))
    FROM pyo.cluster_tunnels t",
@@ -1491,7 +1596,7 @@ const SHOWN: &str = concat!(
 const SHOWN_ONE: &str = concat!(
     "SELECT t.cluster_id, jsonb_build_object(
         'state', t.state, 'error', t.error, 'accountId', t.account_id, 'accountName', t.account_name,
-        'tunnelId', t.tunnel_id, 'tunnelName', t.tunnel_name, 'defaultDomain', t.default_domain, 'portsPublic', t.ports_public,
+        'tunnelId', t.tunnel_id, 'tunnelName', t.tunnel_name, 'defaultDomain', t.default_domain, 'portsPublic', t.ports_public, 'removeWhenBack', t.remove_when_back IS NOT NULL,
         'cfStatus', t.cf_status, 'agentStatus', t.agent_status, 'young', t.created_at > now() - interval '5 minutes',
         'certificate', (SELECT jsonb_build_object('id', c.id, 'notAfter', pyo.ms(c.not_after)) FROM pyo.certificates c WHERE c.id = t.certificate_id))
    FROM pyo.cluster_tunnels t",

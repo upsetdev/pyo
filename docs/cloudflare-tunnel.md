@@ -287,7 +287,17 @@ Cloudflare and the token lives in the cluster.
 - Problems list (one line each, from `cloudflare::problems`):
   "example.com: give the token Cloudflare Tunnel:Edit."
 
-**B. Choose Cloudflare Tunnel for a cluster** (Cluster › Settings, the
+**Since 2026-11-27 (traffic paths, docs/traffic-and-gateway-design.md):**
+the Traffic card has three switches (Public ports, Cloudflare Tunnel,
+Tailnet) instead of the radio group below. Turning Cloudflare Tunnel on
+makes the tunnel and moves no domain. Turning Public ports off with the
+tunnel on moves the domains in the tunnel's account first and closes the
+ports once they're all on it. Turning the tunnel off switches its domains
+back, then removes it at Cloudflare. The Danger zone's Remove tunnel row
+is gone. Public TCP and UDP ports are a cluster setting under Public
+ports. The old ops work as before.
+
+**B. Choose Cloudflare Tunnel for a cluster** (before 2026-11-27) (Cluster › Settings, the
 "Public traffic" panel `dash/src/components/pyo/TrafficMode.tsx:77-114`
 becomes "Traffic", rendered at
 `dash/src/routes/_app/$team/clusters/$clusterId/settings.tsx:120`)
@@ -1664,14 +1674,17 @@ It also lets Pyo run on a server where another program already uses ports
 ## Turn it on
 
 1. Open your cluster's **Settings** and find **Traffic**.
-2. Pick **Cloudflare Tunnel**.
+2. Turn on **Cloudflare Tunnel**.
 3. Pick a **default domain** if you want one. Services get names under
    it, like `web.example.com`.
-4. Select **Switch**.
+4. Select **Turn on**.
 
 Pyo creates the tunnel and starts two connectors on different servers.
-Domains in your Cloudflare account move to the tunnel. If a name has a
-record Pyo didn't make, Pyo asks first. Domains in other accounts stop
+Your domains stay where they are. Move them one at a time, or all at
+once by turning off **Public ports**: Pyo moves the domains in your
+Cloudflare account to the tunnel first, and closes the ports once every
+one of them is on it. If a name has a record Pyo didn't make, Pyo asks
+first, and the ports wait for it. Domains in other accounts stop
 answering from the internet.
 
 ## Move one domain
@@ -1710,9 +1723,11 @@ the tunnel.
 
 ## Turn it off
 
-Pick **Public ports** or **Tailscale only**. Then select **Switch back** on
-each domain, and **Remove tunnel**. Pyo deletes the tunnel and only the
-records it made.
+Turn off **Cloudflare Tunnel**. Pyo lists the domains it touches first.
+With Public ports on, each domain switches back (the records it replaced
+come back, or Pyo points the name at your server), then Pyo deletes the
+tunnel and only the records it made. Names under the default domain stop
+answering. With Public ports off, the tunnel's domains stop answering.
 ```
 
 ## 21. Implementation

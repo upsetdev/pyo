@@ -51,7 +51,14 @@ import { Callout, EmptyState, Panel } from "~/components/ui/Panel";
 import { CopyButton } from "~/components/ui/Table";
 import { api, clusterTraffic, roleIn, usePyo, serviceIdOf } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import type { Application, Certificate, Domain } from "~/lib/pyo/types";
+import type { Application, Certificate, Domain, TrafficPath } from "~/lib/pyo/types";
+
+/** Why a domain isn't served: its path is off on its cluster. */
+const NOT_SERVED: Record<TrafficPath, string> = {
+  public: "Public ports are",
+  tunnel: "Cloudflare Tunnel is",
+  tailnet: "Tailnet is",
+};
 
 export const Route = createFileRoute("/_app/$team/$projectId_/$serviceId/domains")({
   component: () => {
@@ -178,6 +185,11 @@ function Domains({ app }: { app: Application }) {
                       </Tooltip>
                     ) : null}
                     <DomainKind hostname={d.hostname} />
+                    {d.served === false && cluster ? (
+                      <span className="text-[12px] text-warning">
+                        Not served. {NOT_SERVED[d.trafficPath ?? "public"]} off on {cluster.name}.
+                      </span>
+                    ) : null}
                     <span className="ml-2 inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">
                       {onlyRedirects(d) ? (
                         <>

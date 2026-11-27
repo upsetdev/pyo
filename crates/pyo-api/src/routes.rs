@@ -287,13 +287,20 @@ async fn target(
     } else {
         None
     };
+    let tailnet_web: bool = sqlx::query_scalar("SELECT tailnet_web FROM pyo.clusters WHERE id = $1")
+        .bind(&cluster_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or(true);
+    let mut specs = domain_specs(&domains);
+    served(&mut specs, tailnet_web);
     Ok(Some((
         cluster_id,
         FirewallTarget {
             service,
             project_id: spec["projectId"].as_str().unwrap_or("").to_owned(),
             ports: serde_json::from_value(spec["ports"].clone()).unwrap_or_default(),
-            domains: domain_specs(&domains),
+            domains: specs,
             routes_revision: revision,
             request_timeout: request_timeout(&timeout),
             network_isolation: isolation,
@@ -302,6 +309,14 @@ async fn target(
             site: serde_json::from_value(spec["site"].clone()).unwrap_or_default(),
         },
     )))
+}
+
+/// Leave out the domains whose path is off: on the tailnet while the
+/// cluster's Tailnet switch is off (traffic_paths.rs). Their HTTPRoutes go.
+/// A ts.net name has no certificate of its own (the tailnet Gateway's
+/// listener has Tailscale's), so that listener doesn't change.
+pub fn served(specs: &mut Vec<DomainSpec>, tailnet_web: bool) {
+    specs.retain(|d| crate::traffic_paths::served_on_tailnet(&d.hostname, tailnet_web));
 }
 
 /// A command as it's handed to the agent: whatever it carries of a
@@ -333,16 +348,18 @@ async fn current(db: &PgPool, o: &mut Value) -> anyhow::Result<()> {
     let Some(id) = o["service"]["serviceId"].as_str() else {
         return Ok(());
     };
-    let row: Option<(Value, i64)> = sqlx::query_as(
-        "SELECT jsonb_build_object('domains', coalesce(spec->'domains', '[]'), 'requestTimeout', spec->'requestTimeout'), routes_revision
-           FROM pyo.services WHERE id = $1",
+    let row: Option<(Value, i64, bool)> = sqlx::query_as(
+        "SELECT jsonb_build_object('domains', coalesce(a.spec->'domains', '[]'), 'requestTimeout', a.spec->'requestTimeout'), a.routes_revision,
+                coalesce(c.tailnet_web, true)
+           FROM pyo.services a LEFT JOIN pyo.clusters c ON c.id = a.cluster_id WHERE a.id = $1",
     )
     .bind(id)
     .fetch_optional(db)
     .await?;
-    if let Some((routing, revision)) = row {
+    if let Some((routing, revision, tailnet_web)) = row {
         let mut conn = db.acquire().await?;
-        let specs = crate::paths::specs(&mut conn, id, &routing["domains"]).await?;
+        let mut specs = crate::paths::specs(&mut conn, id, &routing["domains"]).await?;
+        served(&mut specs, tailnet_web);
         o["domains"] = serde_json::to_value(specs).unwrap_or(json!([]));
         o["requestTimeout"] = json!(request_timeout(&routing));
         o["routesRevision"] = json!(revision);

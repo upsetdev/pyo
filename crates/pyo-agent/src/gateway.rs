@@ -4186,6 +4186,15 @@ mod tests {
                 s.domains.push(domain("plain2.example.com", "http", "", false));
             })),
             ("service_added", shop(&|_| {})),
+            // Traffic paths (docs/traffic-and-gateway-design.md §9). The
+            // Tailnet switch: a ts.net name's routes come and go, on the
+            // tailnet Gateway whose certificates stay.
+            ("tailnet_on", shop(&|s| s.domains.push(domain("shop.tail1234.ts.net", "http", "", false)))),
+            // A free name on a Tailscale address: its own listener.
+            ("tailnet_free_on", shop(&|s| s.domains.push(domain("shop.100.64.0.2.nip.io", "http", "selfsigned", false)))),
+            // A domain moving to the tunnel, on it, and (as base) back.
+            ("tunnel_switching", shop(&|s| s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into())),
+            ("tunnel_on", shop(&|s| s.domains[0].tunnel = pyo_proto::TUNNEL_ON.into())),
         ];
         // A third service, new on the cluster, with a plain HTTP domain.
         let mut added = spec(vec![domain("new.example.com", "http", "", false)]);
@@ -4199,9 +4208,17 @@ mod tests {
             system::client_policy(false, system::WebSettings::default()),
             system::client_policy(true, system::WebSettings::default()),
         ];
+        // The tailnet Gateway, with the certificate of the service's ts.net
+        // name: it stays while the Tailnet switch is off.
+        let tailnet = json!({
+            "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway",
+            "metadata": { "name": system::TAILNET_GATEWAY, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": MANAGER } },
+            "spec": system::tailnet_gateway_spec(&[system::tailnet_tls_secret("shop")]),
+        });
         std::fs::create_dir_all(&dir).unwrap();
         for (name, s) in states {
             let mut objects = fixed.clone();
+            objects.push(tailnet.clone());
             objects.extend(route_objects(&other).objects);
             objects.extend(route_objects(&s).objects);
             if name == "service_added" {

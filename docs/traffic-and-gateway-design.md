@@ -398,8 +398,9 @@ setClusterPaths."
 
 - Snapshot per cluster gains `paths: { public, tunnel, tailnet }`,
   `publicPorts` and `proxyProtocol`. `traffic` stays.
-- Each domain gains `path` (`"public" | "tunnel" | "tailnet"`) and
-  `served` (false while its path is off).
+- Each domain gains `trafficPath` (`"public" | "tunnel" | "tailnet"`) and
+  `served` (false while its path is off). Not `path`, which is the
+  domain's URL path.
 - `dash/src/lib/pyo/types.ts`: `Cluster` and `Domain` follow.
 
 ### 6.4 CLI and MCP
@@ -415,7 +416,9 @@ setClusterPaths."
 
 ### 7.1 Columns
 
-Migration `crates/pyo-api/migrations/00NN_traffic_paths.sql`:
+Migration `crates/pyo-api/migrations/0047_traffic_paths.sql` (it also adds
+`close_public_after` and `remove_when_back`, see "Traffic paths as
+built"):
 
 ```sql
 -- Services' websites answer on the tailnet (ts.net names, the servers'
@@ -499,12 +502,12 @@ its own.
 | Public ports off | Connections that came in on public ports end, after the confirm. Tunnel and tailnet connections stay | ServiceLB removes its pods. No listener changes |
 | Cloudflare Tunnel on | Nothing | The connector and `pyo-tunnel-origin` are new. No domain has moved yet |
 | A domain moves to the tunnel (`switching`) | That domain's open connections drain once | Its filter chain gets the tunnel client policy (visitor from X-Forwarded-For, trusted from the connectors). That's per filter chain in Envoy, so it can't be route-only |
-| `switching` → `on` | Nothing | The gate goes into its SecurityPolicy, and its :80 route goes. With every route always carrying its policies, both are route changes |
+| `switching` → `on` | That domain's open connections drain once more (measured, see "Traffic paths as built") | The gate goes into its SecurityPolicy, and its :80 route goes. Its route policy's name changes with its route's, and the filter is named after it |
 | A domain moves back to public ports | That domain's open connections drain once | Its filter chain drops the tunnel client policy |
 | Cloudflare Tunnel off | Domains still on the tunnel stop (confirmed). Moved-back domains drained once each when they moved | |
 | A connector rollout | Tunnel domains drain about 3 times (unchanged, cloudflare-tunnel.md §7.3) | The trusted address list is in the tunnel client policies |
-| Tailnet off | ts.net domains stop (confirmed). Other tailnet names, Pyo's dashboard included, stay connected | Only routes and hosting change. Certificates stay, so the `pyo-tailnet` HTTPS listener is untouched |
-| Tailnet on | Nothing | Routes and hosting come back |
+| Tailnet off | ts.net domains stop (confirmed). On the cluster Pyo runs on, with services' ts.net names, Pyo's own tailnet names drain once (said in the confirm) | Only routes change, and hosting and certificates stay. But the last service route takes its rate limit filter off the `pyo-tailnet` HTTPS chain |
+| Tailnet on | Nothing, except as above on the cluster Pyo runs on | Routes come back, with the filter |
 | TCP and UDP ports on or off | Port connections end when off (confirmed). Web connections stay | `pyo-public-ports` is its own Service with its own ServiceLB pods |
 | PROXY protocol on or off | Every connection on ports 80 and 443 drains once: public, tunnel and the Tailscale addresses. ts.net names stay | `proxyProtocol` is a listener filter (listener-wide in Envoy). Checked with egctl (§20). Unchanged from today |
 
@@ -911,6 +914,95 @@ Each with a pick.
 8. **Default path for a new domain with Public and Tunnel on.** Pick:
    Direct, except names under the default domain. Tunnel when Public is
    off.
+
+## Traffic paths as built (2026-11-27)
+
+Built on `feat/traffic-paths`. Where the code differs from the sections
+above, this list wins. Each change keeps traffic flowing.
+
+- **Domain field name.** A domain's path is `trafficPath`, not `path`
+  (§6.3). `path` is already the domain's URL path ("/api"), so writing the
+  traffic path there would have changed its routes.
+- **Tailnet off keeps the hosting.** `tailscale::wanted_for` is unchanged:
+  services' ts.net names stay hosted on the servers, and only their routes
+  go (§8). Envoy answers them with 404. Taking the names off at Tailscale
+  and back could take minutes and give them new addresses. This way
+  turning Tailnet on is one routes sync. Leaving the routes out happens
+  when a command is handed to the agent (`routes::current`, `served`), so
+  deploys, routes syncs and firewall syncs all follow the switch.
+- **Free domains on a Tailscale address.** They sit on their service's own
+  HTTPS Gateway, not on the tailnet listener. With Tailnet off their
+  listener and certificate go with their routes. Only that domain's filter
+  chain changes, and that domain is the one that stops. Their certificate
+  is self-signed, so it is made again at once when Tailnet goes back on.
+- **Public off after moves.** `clusters.close_public_after` is set while
+  the ports wait. The tunnel loop (`tunnel_loop::close_public`) sets
+  `traffic` to `tunnel` once no domain of the cluster has
+  `tunnel: "switching"`. That covers domains still moving and domains
+  waiting for "Replace and switch". Turning Public ports on again cancels
+  it. While it waits, the switch shows Public ports on, with "Moving 6
+  domains to the tunnel… Public ports close after the last one."
+- **Tunnel off with Public ports on.** Each tunnel domain outside the
+  default domain runs the existing Switch back (records restored when
+  kept, both paths answer meanwhile). `cluster_tunnels.remove_when_back`
+  is set, and the loop marks the tunnel `removing` once no record is
+  still `reverting` (`tunnel_loop::remove_when_back`). Then the existing
+  removal runs. Names under the default domain stop and are listed so.
+  With Public ports off the tunnel is removed at once, as before.
+- **Migration** `0047_traffic_paths.sql` also adds
+  `clusters.close_public_after` and `cluster_tunnels.remove_when_back`.
+  The `ports_public` and `public_ports` triggers run both ways: a tunnel
+  row written by the previous release (its setClusterTraffic) moves the
+  cluster's setting too. The old ops `setClusterTraffic` with `public` or
+  `tailscale` and `setClusterPublicTraffic` clear `public_ports`, so they
+  send the agent the same `publicPorts` as before.
+- **Mixed versions.** While the previous release still serves during an
+  update, a cluster in a state it can't express (Tailnet only with TCP
+  and UDP ports on) gets `publicPorts: false` from its replicas. The ports
+  come back with the next heartbeat the new release answers. The same
+  applies to a tunnel-mode cluster switched to Tailscale only through the
+  previous release's dashboard during the update: its ports stay on until
+  someone saves the switch again.
+- **Snapshot.** Each cluster has `paths`, `publicPorts`, `proxyProtocol`,
+  `tailnetWeb`, `closingPublic` and `publicPortsSet` (the stored value,
+  null before anyone set it). Its `tunnel` has `removeWhenBack`.
+- **Old op mapping.** The old ops keep their own code (§6.2 asked for the
+  same stored values, and running them through the new op would have
+  moved domains or waited where they never did). They gained "Prefer
+  setClusterPaths." and clear a waiting close.
+- **CLI.** `pyo cluster paths <cluster>` takes `--move-to-tunnel on|off`
+  and `--restore-records on|off` (both on by default), and prints the
+  paths when given no flag.
+- **Domain dialog.** The Path choice is built for Your domain. A Free
+  domain stays on the public IP (or under the default domain in tunnel
+  mode, as before). A name under the default domain can be added as Your
+  domain with Path Cloudflare Tunnel. Editing a domain keeps Switch to
+  Tunnel and Switch back as menu actions. Both confirms now say "Open
+  connections to shop.example.com drop once."
+- **TCP and UDP ports off** has a confirm of its own: "Open connections
+  to them end."
+- **Last path.** The dashboard refuses it before asking the API, with the
+  same words.
+- **Tailnet off and on drain the tailnet listener once** (found with
+  `scripts/gateway-drain-check.sh`, 2026-11-27). Services' ts.net routes
+  carry their route policies (the idle rate limit), Pyo's own routes there
+  carry none. With every service's ts.net route gone, or back, the
+  `local_ratelimit` filter leaves or joins the `pyo-tailnet` HTTPS chain.
+  On other clusters only the ts.net names that stop are on it. On the
+  cluster Pyo runs on, Pyo's dashboard, registry and sandboxes names are
+  too: their open connections drop once. The answer has `dashboardDrops`
+  and both confirms say "Open connections to Pyo on the tailnet drop once.
+  The dashboard reconnects by itself." (Tailnet on asks too, there.) The
+  fix is an always-on route policy on Pyo's own tailnet routes. It needs
+  new admission rules and a connect-command refresh, so it's left for the
+  Gateway section's release.
+- **`switching` → `on` drains the moving domain once more.** Its route
+  policy is named after its route (`…-switching-plain-http`, then
+  `…-tunnel-plain-http`), and Envoy Gateway names the `custom_response`
+  filter after the policy. So a domain moved to the tunnel drains twice,
+  and one moved back drains once. That's the tunnel's route naming, not
+  traffic paths. Naming the policy by domain instead would make it one
+  drain, after one more drain when it rolls out.
 
 ## 19. Estimate
 

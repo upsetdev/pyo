@@ -2899,6 +2899,19 @@ pub struct HeartbeatReply {
     /// reply without it): as `public_traffic` says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_ports: Option<bool>,
+    /// Services' websites answer on the tailnet (the cluster's Tailnet
+    /// switch). Off: the websites aren't published on the servers'
+    /// Tailscale addresses, whatever `free_domain_address` says. Pyo's own
+    /// tailnet names stay. None (a reply without it): on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailnet_web: Option<bool>,
+}
+
+/// Whether the websites go on the servers' Tailscale addresses
+/// (system.rs `TAILNET_WEB_SERVICE`): free domains point there and the
+/// cluster's Tailnet switch is on.
+pub fn tailnet_web_wanted(free_domain_address: &str, tailnet_web: Option<bool>) -> bool {
+    free_domain_address == "tailscale" && tailnet_web != Some(false)
 }
 
 /// Pyo's dashboard on the public IP ([`system::public_dashboard_objects`]).
@@ -3851,5 +3864,24 @@ mod pod_problems {
         }
         assert_eq!(workload_problem(NOT_RUNNING_YET), None);
         assert_eq!(workload_problem("ContainerCreating"), None);
+    }
+}
+
+#[cfg(test)]
+mod tailnet_web {
+    use super::*;
+
+    #[test]
+    fn websites_go_on_tailscale_addresses_only_while_the_tailnet_switch_is_on() {
+        assert!(tailnet_web_wanted("tailscale", None), "an older Pyo's reply");
+        assert!(tailnet_web_wanted("tailscale", Some(true)));
+        assert!(!tailnet_web_wanted("tailscale", Some(false)));
+        assert!(!tailnet_web_wanted("public", Some(true)));
+        assert!(!tailnet_web_wanted("tunnel", None));
+        // An older agent reads a reply with the field as before.
+        let r: HeartbeatReply = serde_json::from_value(serde_json::json!({ "tailnetWeb": false })).unwrap();
+        assert_eq!(r.tailnet_web, Some(false));
+        let r: HeartbeatReply = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(r.tailnet_web, None);
     }
 }

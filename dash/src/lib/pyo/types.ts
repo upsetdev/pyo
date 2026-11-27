@@ -465,6 +465,16 @@ export type Cluster = {
   publicTraffic?: boolean;
   /** How it takes web traffic: public ports, only the tailnet, or Cloudflare Tunnel. */
   traffic?: ClusterTraffic;
+  /** Its traffic paths, as saved: each on or off. */
+  paths?: ClusterPaths;
+  /** TCP and UDP ports stay on the servers while public ports are off. */
+  publicPorts?: boolean;
+  /** Same as webProxyProtocol. */
+  proxyProtocol?: boolean;
+  /** Websites answer on the tailnet (the Tailnet switch). */
+  tailnetWeb?: boolean;
+  /** Public ports close once the domains moving to the tunnel are on it. */
+  closingPublic?: boolean;
   /** Its Cloudflare Tunnel; absent when it has none. */
   tunnel?: ClusterTunnel | null;
   /** Its public IPv4 address, for DNS records (never a private one); null without one. */
@@ -572,6 +582,20 @@ export type Cluster = {
 /** How a cluster takes web traffic. */
 export type ClusterTraffic = "public" | "tailscale" | "tunnel";
 
+/** A traffic path: public ports, Cloudflare Tunnel or the tailnet. */
+export type TrafficPath = "public" | "tunnel" | "tailnet";
+export type ClusterPaths = Record<TrafficPath, boolean>;
+
+/** A domain a path change touches, as `setClusterPaths` lists it. */
+export type PathDomain = {
+  serviceId: ID;
+  service: string;
+  domainId: ID;
+  hostname: string;
+  path: TrafficPath;
+  outcome: "moves" | "stops";
+};
+
 /**
  * "starting" until Cloudflare's first report. "unknown": Pyo tried
  * Cloudflare and failed, or no report came in 5 minutes.
@@ -591,6 +615,8 @@ export type ClusterTunnel = {
   defaultDomain: string | null;
   /** Public TCP and UDP ports stay open on the servers. */
   portsPublic: boolean;
+  /** Turned off: removed once its domains are back on public ports. */
+  removeWhenBack?: boolean;
   connectors: { server: string; ready: boolean; reason?: string | null }[];
   /** Cloudflare's data centers it's connected to ("FRA"). */
   colos: string[];
@@ -1020,6 +1046,10 @@ export type Domain = {
   dnsRecord?: DnsRecordState;
   /** Through the cluster's Cloudflare Tunnel: "switching" (both ways work) or "on". */
   tunnel?: "switching" | "on";
+  /** The traffic path it takes (not its URL path). */
+  trafficPath?: TrafficPath;
+  /** False while its path is off on the cluster: it doesn't answer. */
+  served?: boolean;
   /** Its redirects in Pyo Gateway. A domain without a port only redirects. */
   redirects?: DomainRedirect[];
   /** Its header rules in Pyo Gateway. */

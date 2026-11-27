@@ -108,7 +108,7 @@ pub fn install_ready(capabilities: &Value) -> Result<(), &'static str> {
 
 /// A domain that can go through the tunnel: a hostname a tunnel-ready zone
 /// of the tunnel's account covers. Not a free or tailnet domain.
-fn can_tunnel(host: &str, zones: &[Zone], account_id: &str) -> Option<Zone> {
+pub(crate) fn can_tunnel(host: &str, zones: &[Zone], account_id: &str) -> Option<Zone> {
     if crate::freedomain::ip_in(host).is_some() || pyo_proto::system::is_tailnet_host(host) {
         return None;
     }
@@ -314,7 +314,9 @@ pub async fn set_traffic(
             .fetch_one(&mut **tx)
             .await?;
     if mode != "tunnel" {
-        sqlx::query("UPDATE pyo.clusters SET traffic = $2 WHERE id = $1")
+        // As before the Traffic card had switches: TCP and UDP ports go with
+        // public traffic (`public_ports` unset), and nothing waits to close.
+        sqlx::query("UPDATE pyo.clusters SET traffic = $2, public_ports = NULL, close_public_after = NULL WHERE id = $1")
             .bind(cluster_id)
             .bind(mode)
             .execute(&mut **tx)
@@ -337,6 +339,110 @@ pub async fn set_traffic(
         return Ok(json!({ "ok": true, "traffic": mode }));
     }
     install_ready(&caps).map_err(bad)?;
+    let (a, account_id) = upsert_tunnel(
+        s,
+        tx,
+        user,
+        &team_id,
+        cluster_id,
+        &name,
+        default_domain_given,
+        account_asked,
+        ports_public,
+    )
+    .await?;
+    sqlx::query("UPDATE pyo.clusters SET traffic = 'tunnel', close_public_after = NULL WHERE id = $1")
+        .bind(cluster_id)
+        .execute(&mut **tx)
+        .await?;
+    // Its domains in the account move to the tunnel. Those with someone
+    // else's record wait at "confirm" for an owner or admin.
+    let moving = move_domains(tx, &team_id, cluster_id, &a.zones, &account_id, None, wake).await?;
+    log_activity(
+        tx,
+        &team_id,
+        &user.name,
+        "cluster.updated",
+        "info",
+        &format!("{name} takes websites through Cloudflare Tunnel"),
+        json!({ "kind": "cluster", "id": cluster_id, "label": name }),
+        json!({ "clusterId": cluster_id, "moving": moving }),
+    )
+    .await?;
+    wake.push(cluster_id.to_owned());
+    Ok(json!({ "ok": true, "traffic": "tunnel", "moving": moving }))
+}
+
+/// The domains of a cluster that can move to its tunnel: not on it yet,
+/// in a tunnel-ready zone of the tunnel's account. (service, domain, host).
+pub(crate) fn movable(services: &[(String, Value)], zones: &[Zone], account_id: &str) -> Vec<(String, String, String)> {
+    let mut out = vec![];
+    for (service_id, domains) in services {
+        for d in domains.as_array().into_iter().flatten() {
+            let host = d["hostname"].as_str().unwrap_or("").to_lowercase();
+            if d["tunnel"].is_string() || can_tunnel(&host, zones, account_id).is_none() {
+                continue;
+            }
+            out.push((service_id.clone(), d["id"].as_str().unwrap_or("").to_owned(), host));
+        }
+    }
+    out
+}
+
+/// Move the cluster's domains in the tunnel's account to the tunnel (all
+/// of them, or the ones in `only`): each takes "switching", so both paths
+/// answer while its record moves. How many.
+pub(crate) async fn move_domains(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    cluster_id: &str,
+    zones: &[Zone],
+    account_id: &str,
+    only: Option<&[(String, String, String)]>,
+    wake: &mut Vec<String>,
+) -> ApiResult<usize> {
+    let services: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT id, coalesce(spec->'domains', '[]') FROM pyo.services WHERE cluster_id = $1 AND NOT deleting ORDER BY id",
+    )
+    .bind(cluster_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut moving = 0;
+    let mut touched: Vec<String> = vec![];
+    for (service_id, domain_id, host) in movable(&services, zones, account_id) {
+        if only.is_some_and(|o| !o.iter().any(|(s, d, _)| *s == service_id && *d == domain_id)) {
+            continue;
+        }
+        let Some(zone) = can_tunnel(&host, zones, account_id) else {
+            continue;
+        };
+        if begin_switch(tx, team_id, &service_id, &domain_id, &host, &zone, false, None).await? && !touched.contains(&service_id) {
+            touched.push(service_id.clone());
+        }
+        moving += 1;
+    }
+    for service_id in touched {
+        sync(tx, &service_id, wake).await?;
+    }
+    Ok(moving)
+}
+
+/// Make the cluster's tunnel, or change its default domain: the
+/// Cloudflare account and its zones. Refused while it's being removed or
+/// when it's in another account.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upsert_tunnel(
+    s: &AppState,
+    tx: &mut Transaction<'_, Postgres>,
+    user: &User,
+    team_id: &str,
+    cluster_id: &str,
+    name: &str,
+    default_domain_given: Option<&str>,
+    account_asked: Option<&str>,
+    ports_public: Option<bool>,
+) -> ApiResult<(super::Account, String)> {
+    let team_id = team_id.to_owned();
     let a = account(s, tx, &team_id)
         .await?
         .ok_or_else(|| bad("Connect Cloudflare under Integrations first."))?;
@@ -381,7 +487,7 @@ pub async fn set_traffic(
             sqlx::query(
                 "UPDATE pyo.cluster_tunnels SET default_domain = $2, default_zone_id = $3,
                         default_record_id = CASE WHEN default_domain IS DISTINCT FROM $2 THEN NULL ELSE default_record_id END,
-                        ports_public = coalesce($4, ports_public), updated_at = now()
+                        ports_public = coalesce($4, ports_public), remove_when_back = NULL, updated_at = now()
                   WHERE cluster_id = $1",
             )
             .bind(cluster_id)
@@ -421,50 +527,7 @@ pub async fn set_traffic(
             .await?;
         }
     }
-    sqlx::query("UPDATE pyo.clusters SET traffic = 'tunnel' WHERE id = $1")
-        .bind(cluster_id)
-        .execute(&mut **tx)
-        .await?;
-    // Its domains in the account move to the tunnel. Those with someone
-    // else's record wait at "confirm" for an owner or admin.
-    let services: Vec<(String, Value)> = sqlx::query_as(
-        "SELECT id, coalesce(spec->'domains', '[]') FROM pyo.services WHERE cluster_id = $1 AND NOT deleting ORDER BY id",
-    )
-    .bind(cluster_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    let mut moving = 0;
-    for (service_id, domains) in services {
-        let mut any = false;
-        for d in domains.as_array().into_iter().flatten() {
-            let host = d["hostname"].as_str().unwrap_or("").to_lowercase();
-            if d["tunnel"].is_string() {
-                continue;
-            }
-            let Some(zone) = can_tunnel(&host, &a.zones, &account_id) else {
-                continue;
-            };
-            let domain_id = d["id"].as_str().unwrap_or("");
-            any |= begin_switch(tx, &team_id, &service_id, domain_id, &host, &zone, false, None).await?;
-            moving += 1;
-        }
-        if any {
-            sync(tx, &service_id, wake).await?;
-        }
-    }
-    log_activity(
-        tx,
-        &team_id,
-        &user.name,
-        "cluster.updated",
-        "info",
-        &format!("{name} takes websites through Cloudflare Tunnel"),
-        json!({ "kind": "cluster", "id": cluster_id, "label": name }),
-        json!({ "clusterId": cluster_id, "moving": moving }),
-    )
-    .await?;
-    wake.push(cluster_id.to_owned());
-    Ok(json!({ "ok": true, "traffic": "tunnel", "moving": moving }))
+    Ok((a, account_id))
 }
 
 /// `setDomainTunnel`.

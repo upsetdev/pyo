@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { BrandMark, CLOUDFLARE_LOGO } from "~/components/pyo/common";
+import { Choice, Choices } from "~/components/pyo/Databases";
 import { Badge } from "~/components/ui/Badge";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
@@ -18,6 +19,7 @@ import {
   api,
   cloudflareIn,
   cloudflareZoneFor,
+  clusterPaths,
   clusterTraffic,
   roleIn,
   servicePath,
@@ -271,10 +273,13 @@ export function useTunnelChoice(
     hostname && !isFreeDomain(hostname)
       ? tunnelZoneFor(s, hostname, cluster)
       : undefined;
-  const on =
-    !!zone &&
-    (value.tunnel ?? (!!cluster && clusterTraffic(cluster) === "tunnel"));
-  return { zone, on };
+  // Both paths on: Direct unless picked (a name under the default domain
+  // has no direct record). Public ports off: through the tunnel.
+  const paths = cluster ? clusterPaths(cluster) : undefined;
+  const direct = !!paths?.public && !cluster?.closingPublic;
+  const choose = !!zone && direct;
+  const on = !!zone && (direct ? (value.tunnel ?? false) : true);
+  return { zone, on, choose };
 }
 
 /**
@@ -303,13 +308,23 @@ export function CloudflareFields({
   const ip = s.clusters.find((c) => c.id === clusterId)?.publicIp;
   return (
     <div className="space-y-3">
-      {choice.zone ? (
-        <Switch
-          checked={choice.on}
-          onChange={(on) => onChange({ ...value, tunnel: on })}
-          label="Through Cloudflare Tunnel"
-          description={`CNAME to the tunnel in ${choice.zone.name}`}
-        />
+      {choice.zone && choice.choose ? (
+        <Choices label="Path">
+          <Choice
+            label="Direct"
+            detail="Ports 80 and 443 of the servers"
+            selected={!choice.on}
+            onSelect={() => onChange({ ...value, tunnel: false })}
+          />
+          <Choice
+            label="Cloudflare Tunnel"
+            detail={`CNAME to the tunnel in ${choice.zone.name}`}
+            selected={choice.on}
+            onSelect={() => onChange({ ...value, tunnel: true })}
+          />
+        </Choices>
+      ) : choice.zone ? (
+        <p className="text-[12px] text-muted-foreground">Through Cloudflare Tunnel. No DNS needed.</p>
       ) : null}
       {choice.on ? null : (
         <DirectRecordFields zone={zone} ip={ip} value={value} onChange={onChange} />

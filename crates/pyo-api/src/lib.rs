@@ -91,6 +91,7 @@ mod sites;
 mod snapshot;
 mod source_uploads;
 mod tailscale;
+mod traffic_paths;
 mod teambackup;
 mod teamobs;
 #[cfg(test)]

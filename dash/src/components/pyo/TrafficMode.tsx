@@ -1,13 +1,23 @@
 import { useState, type ReactNode } from "react";
-import { TailnetBadge, teamTailscale } from "~/components/pyo/Tailscale";
+import { teamTailscale } from "~/components/pyo/Tailscale";
 import { TunnelSettings, tunnelUnavailable } from "~/components/pyo/Tunnel";
 import { AppLink } from "~/components/ui/AppLink";
+import { ConfirmDialog } from "~/components/ui/Dialog";
 import { LearnMore } from "~/components/ui/LearnMore";
 import { optionClass, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
-import { api, clusterTraffic, usePyo } from "~/lib/pyo/store";
+import { plural } from "~/lib/pyo/format";
+import {
+  api,
+  clusterPaths,
+  domainPath,
+  listedServices,
+  roleIn,
+  tunnelZoneFor,
+  usePyo,
+} from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import type { Cluster, ClusterTraffic as Traffic, TrafficMode } from "~/lib/pyo/types";
+import type { Cluster, PathDomain, TrafficMode, TrafficPath } from "~/lib/pyo/types";
 
 // How a cluster routes requests. Replicas are placed the same way in every
 // mode (evenly across regions, then servers); this only changes where each
@@ -82,95 +92,343 @@ export function ClusterTrafficMode({ cluster: c }: { cluster: Cluster }) {
           />
         ))}
       </div>
-      <div className="border-t border-border p-4">
-        <Switch
-          checked={!!c.webProxyProtocol}
-          onChange={async (on) => {
-            const res = await api.setClusterWebProxyProtocol(c.id, on);
-            if (res?.ok)
-              toast({
-                title: on
-                  ? "Websites accept PROXY protocol"
-                  : "Websites no longer read PROXY protocol",
-                description: c.name,
-              });
-          }}
-          label="Accept PROXY protocol on web traffic"
-          description={<>Only if all traffic comes through a load balancer that sends it. <LearnMore page="gateway" /></>}
-        />
-      </div>
     </Panel>
   );
 }
 
-const TRAFFIC: { value: Traffic; label: string }[] = [
-  { value: "public", label: "Public ports" },
-  { value: "tailscale", label: "Tailscale only" },
-  { value: "tunnel", label: "Cloudflare Tunnel" },
-];
+const LABEL: Record<TrafficPath, string> = {
+  public: "Public ports",
+  tunnel: "Cloudflare Tunnel",
+  tailnet: "Tailnet",
+};
 
-/** How the cluster takes web traffic: public ports, only the tailnet, or Cloudflare Tunnel. */
+const ONE_PATH = "Turn on another path first. A cluster needs one.";
+
+/** "a, b and 2 more": at most 10 names. */
+function names(xs: string[]) {
+  const shown = xs.slice(0, 10);
+  const more = xs.length - shown.length;
+  if (more > 0) return `${shown.join(", ")} and ${more} more`;
+  return shown.length < 2 ? shown.join("") : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
+}
+
+/** A change waiting for its confirm. */
+type Pending =
+  | { kind: "public" | "tunnel" | "tailnet"; domains: PathDomain[] }
+  | { kind: "proxy"; on: boolean }
+  | { kind: "tailnetOn" }
+  | { kind: "ports" };
+
+/** One path's row: its switch, hint and what's under it. */
+function PathRow({
+  label,
+  hint,
+  on,
+  disabled,
+  onChange,
+  children,
+}: {
+  label: string;
+  hint: ReactNode;
+  on: boolean;
+  disabled: boolean;
+  onChange: (on: boolean) => void;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="space-y-3 border-t border-border px-4 py-3 first:border-t-0">
+      <Switch checked={on} disabled={disabled} onChange={onChange} label={label} description={hint} />
+      {children ? <div className="space-y-3 pl-6">{children}</div> : null}
+    </div>
+  );
+}
+
+/**
+ * The cluster's traffic paths: Public ports, Cloudflare Tunnel and
+ * Tailnet, each on or off. Each domain takes one of the paths that are on.
+ */
 export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
   const s = usePyo();
-  const current = clusterTraffic(c);
-  // Cloudflare Tunnel waits for its settings and a confirm before it applies.
-  const [picked, setPicked] = useState<Traffic | null>(null);
-  const shown = picked ?? current;
-  const unavailable = current === "tunnel" ? null : tunnelUnavailable(s, c);
-  // The team's Tailscale covers this cluster (set up once, on Integrations).
-  const tailscale = teamTailscale(s)?.clusters.some((x) => x.id === c.id);
-  const hint = (m: Traffic) =>
-    m === "public"
-      ? "Ports 80 and 443 on every server except build-only servers."
-      : m === "tailscale"
-        ? c.tailnet || c.tailscale
-          ? "Only from your tailnet."
-          : "Only inside the cluster until you set up Tailscale."
-        : (unavailable ?? "No open ports. Websites come in through Cloudflare.");
-  const pick = async (m: Traffic) => {
-    if (m === "tunnel" && current !== "tunnel") return setPicked(m);
-    setPicked(null);
-    if (m === current) return;
-    const res = await api.setClusterTraffic(c.id, m);
-    if (res?.ok)
-      toast({ title: TRAFFIC.find((x) => x.value === m)!.label, description: c.name });
+  const admin = ["owner", "admin"].includes(roleIn(s) ?? "");
+  const paths = clusterPaths(c);
+  // Cloudflare Tunnel waits for its settings and Turn on.
+  const [opening, setOpening] = useState(false);
+  const [pending, setPending] = useState<Pending | null>(null);
+  const [move, setMove] = useState(true);
+  const [ports, setPorts] = useState(true);
+  const [restore, setRestore] = useState(true);
+  const unavailable = paths.tunnel ? null : tunnelUnavailable(s, c);
+  const tailscale = !!teamTailscale(s)?.clusters.some((x) => x.id === c.id) || !!c.tailnet || !!c.tailscale;
+  const services = listedServices(s).filter((a) => a.clusterId === c.id);
+  const hasPorts = services.some((a) => a.ports.some((p) => p.exposure === "loadbalancer"));
+  const domains: (PathDomain & { kept: boolean })[] = services.flatMap((a) =>
+    a.domains.map((d) => ({
+      // Switch back puts this record back.
+      kept: !!d.dnsRecord?.previous?.length,
+      serviceId: a.id,
+      service: a.name,
+      domainId: d.id,
+      hostname: d.hostname,
+      path: domainPath(d, c),
+      outcome: "stops" as const,
+    })),
+  );
+  const onPath = (p: TrafficPath) => domains.filter((d) => d.path === p);
+  // The tailnet listener changes on the cluster Pyo runs on: its own
+  // dashboard there drops once (traffic_paths.rs `dashboard_drops`).
+  const dashboardDrops = !!c.sameCluster && domains.some((d) => d.hostname.toLowerCase().endsWith(".ts.net"));
+  const DASHBOARD_DROPS = "Open connections to Pyo on the tailnet drop once. The dashboard reconnects by itself.";
+  const movable = (host: string) => !!tunnelZoneFor(s, host, c);
+  const removing = !!c.tunnel?.removeWhenBack || c.tunnel?.state === "removing";
+  const switching = services.flatMap((a) => a.domains).filter((d) => d.tunnel === "switching");
+  const conflicts = switching.filter((d) => d.dnsRecord?.status === "conflict");
+
+  const send = async (args: Parameters<typeof api.setClusterPaths>[1], title: string) => {
+    const r = await api.setClusterPaths(c.id, args);
+    if (!r?.ok) return;
+    // Out of date here: the cluster's list, from the API.
+    if (r.status === "confirm") {
+      const kind = args.public === false ? "public" : args.tunnel === false ? "tunnel" : "tailnet";
+      setPending({ kind, domains: r.domains });
+      return;
+    }
+    toast({ title, description: c.name });
   };
+
+  const toggle = (p: TrafficPath, on: boolean) => {
+    if (!on && Object.entries(paths).filter(([k, v]) => v && k !== p).length === 0) {
+      toast({ tone: "error", title: ONE_PATH });
+      return;
+    }
+    if (on) {
+      if (p === "tunnel") return setOpening(true);
+      if (p === "tailnet" && dashboardDrops) return setPending({ kind: "tailnetOn" });
+      return void send({ [p]: true }, `${LABEL[p]} on`);
+    }
+    // Off: the confirm lists what it touches.
+    // Back on public ports takes a kept record or the cluster's public IP.
+    const list: PathDomain[] = onPath(p).map(({ kept, ...d }) => ({
+      ...d,
+      outcome:
+        (p === "public" && paths.tunnel && movable(d.hostname)) ||
+        (p === "tunnel" && paths.public && !domainUnderDefault(d.hostname, c) && (!!c.publicIp || kept))
+          ? ("moves" as const)
+          : ("stops" as const),
+    }));
+    if (p === "public" || list.length) {
+      setMove(true);
+      setPorts(true);
+      setRestore(true);
+      setPending({ kind: p, domains: list });
+      return;
+    }
+    void send({ [p]: false }, `${LABEL[p]} off`);
+  };
+
+  const go = () => {
+    if (!pending) return;
+    if (pending.kind === "proxy")
+      return void send({ proxyProtocol: pending.on }, pending.on ? "Websites accept PROXY protocol" : "Websites no longer read PROXY protocol");
+    if (pending.kind === "ports") return void send({ publicPorts: false }, "TCP and UDP ports closed");
+    if (pending.kind === "tailnetOn") return void send({ tailnet: true }, "Tailnet on");
+    const args =
+      pending.kind === "public"
+        ? { public: false, moveToTunnel: move, ...(hasPorts ? { publicPorts: ports } : {}) }
+        : pending.kind === "tunnel"
+          ? { tunnel: false, restoreRecords: restore }
+          : { tailnet: false };
+    void send({ ...args, confirm: true }, `${LABEL[pending.kind]} off`);
+  };
+
+  const listed = pending && "domains" in pending ? pending.domains : [];
+  const moving = listed.filter((d) => d.outcome === "moves");
+  const stopping = listed.filter((d) => d.outcome === "stops");
+  const dialog = (() => {
+    if (!pending) return null;
+    switch (pending.kind) {
+      case "public":
+        return {
+          title: `Close public ports on ${c.name}?`,
+          confirm: "Close public ports",
+          lines: [
+            moving.length === 1
+              ? "1 domain is in your Cloudflare account."
+              : moving.length
+                ? `${moving.length} domains are in your Cloudflare account.`
+                : null,
+            moving.length && move ? "Open connections to each of them drop once as it moves." : null,
+            stopping.length || (!move && moving.length)
+              ? `These stop answering from the internet: ${names((move ? stopping : listed).map((d) => d.hostname))}.`
+              : null,
+            c.sameCluster ? "The public dashboard closes. Open Pyo through Tailscale or your local network." : null,
+          ],
+        };
+      case "tunnel":
+        return {
+          title: `Turn off Cloudflare Tunnel on ${c.name}?`,
+          confirm: "Turn off",
+          lines: [
+            moving.length === 1
+              ? "1 domain switches back to public ports."
+              : moving.length
+                ? `${moving.length} domains switch back to public ports.`
+                : null,
+            moving.length ? "Open connections to each of them drop once." : null,
+            stopping.length ? `These stop answering: ${names(stopping.map((d) => d.hostname))}.` : null,
+            "Pyo removes the tunnel at Cloudflare.",
+          ],
+        };
+      case "tailnet":
+        return {
+          title: `Stop serving websites on the tailnet on ${c.name}?`,
+          confirm: "Stop serving",
+          lines: [
+            stopping.length ? `These stop answering: ${names(stopping.map((d) => d.hostname))}.` : null,
+            dashboardDrops ? DASHBOARD_DROPS : null,
+            "Servers stay on the tailnet.",
+          ],
+        };
+      case "tailnetOn":
+        return {
+          title: `Serve websites on the tailnet on ${c.name}?`,
+          confirm: "Serve",
+          lines: [DASHBOARD_DROPS],
+        };
+      case "proxy":
+        return {
+          title: `${pending.on ? "Accept" : "Stop reading"} PROXY protocol on ${c.name}?`,
+          confirm: "Save",
+          lines: [
+            `Saving drops open connections on every website of ${c.name} once. Visitors reconnect. WebSockets and uploads in progress are cut.`,
+          ],
+        };
+      case "ports":
+        return {
+          title: `Close TCP and UDP ports on ${c.name}?`,
+          confirm: "Close ports",
+          lines: ["Open connections to them end."],
+        };
+    }
+  })();
+
+  const publicHint = (() => {
+    if (paths.public && c.closingPublic)
+      return conflicts.length
+        ? `Closing public ports after the last domain moves… Waiting for Replace and switch: ${names(conflicts.map((d) => d.hostname))}.`
+        : `Moving ${plural(switching.length, "domain")} to the tunnel… Public ports close after the last one.`;
+    return "Ports 80 and 443 on every server except build-only servers.";
+  })();
+  const tunnelHint = (() => {
+    if (c.tunnel?.removeWhenBack)
+      return `Moving ${plural(switching.length, "domain")} back to public ports… Then the tunnel is removed.`;
+    if (c.tunnel?.state === "removing") return "Removing the tunnel…";
+    if (!paths.tunnel && unavailable) return unavailable;
+    return "Websites through Cloudflare. No open ports needed.";
+  })();
+  const tailnetHint = !tailscale ? (
+    "Connect Tailscale on Integrations first."
+  ) : (
+    <>
+      Websites on ts.net names, for devices on your tailnet. Servers stay on the tailnet when this is off.
+      {c.tailnet ? <span className="ml-1 font-mono">{c.tailnet}</span> : null}
+    </>
+  );
+
   return (
     <Panel title="Traffic" actions={<LearnMore page="gateway" />}>
-      <div role="radiogroup" aria-label="How the cluster takes web traffic" className="space-y-2 p-4">
-        {TRAFFIC.map((m) => (
-          <RadioOption
-            key={m.value}
-            name={`public-${c.id}`}
-            checked={shown === m.value}
-            disabled={m.value === "tunnel" && !!unavailable}
-            label={m.label}
-            hint={hint(m.value)}
-            onSelect={() => void pick(m.value)}
-          />
-        ))}
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3">
-        <span className="text-[13px] font-medium">Tailscale</span>
-        <span className="flex items-center gap-3">
-          <TailnetBadge clusterId={c.id} />
-          {tailscale ? null : (
-            <AppLink
-              href="/integrations#tailscale"
-              className="text-[12.5px] font-medium text-primary hover:text-primary/80"
-            >
-              Integrations
-            </AppLink>
-          )}
-        </span>
-      </div>
-      {shown === "tunnel" || c.tunnel ? (
-        <TunnelSettings
-          c={c}
-          editing={shown === "tunnel"}
-          onCancel={() => setPicked(null)}
+      <PathRow
+        label={LABEL.public}
+        hint={publicHint}
+        on={paths.public}
+        disabled={!admin}
+        onChange={(on) => toggle("public", on)}
+      >
+        <Switch
+          checked={!!(c.proxyProtocol ?? c.webProxyProtocol)}
+          disabled={!admin}
+          onChange={(on) => setPending({ kind: "proxy", on })}
+          label="Accept PROXY protocol"
+          description="Only if every connection comes through a load balancer that sends it."
         />
+        {hasPorts ? (
+          paths.public ? (
+            <p className="flex flex-wrap justify-between gap-2 text-[13px]">
+              <span className="font-medium">TCP and UDP ports</span>
+              <span className="text-[12px] text-muted-foreground">Published with the websites.</span>
+            </p>
+          ) : (
+            <Switch
+              checked={!!c.publicPorts}
+              disabled={!admin}
+              onChange={(on) => (on ? void send({ publicPorts: true }, "TCP and UDP ports published") : setPending({ kind: "ports" }))}
+              label="Publish TCP and UDP ports"
+              description="On every server except build-only servers."
+            />
+          )
+        ) : null}
+      </PathRow>
+      <PathRow
+        label={LABEL.tunnel}
+        hint={tunnelHint}
+        on={paths.tunnel || removing}
+        disabled={!admin || removing || (!paths.tunnel && !!unavailable) || opening}
+        onChange={(on) => toggle("tunnel", on)}
+      />
+      {opening || c.tunnel ? (
+        <TunnelSettings c={c} editing={admin && (opening || paths.tunnel)} turningOn={opening} onDone={() => setOpening(false)} />
+      ) : null}
+      <PathRow
+        label={LABEL.tailnet}
+        hint={tailnetHint}
+        on={paths.tailnet}
+        disabled={!admin || !tailscale}
+        onChange={(on) => toggle("tailnet", on)}
+      >
+        {tailscale ? null : (
+          <AppLink href="/integrations#tailscale" className="text-[12.5px] font-medium text-primary hover:text-primary/80">
+            Integrations
+          </AppLink>
+        )}
+      </PathRow>
+      {dialog ? (
+        <ConfirmDialog
+          open
+          onClose={() => setPending(null)}
+          tone={pending?.kind === "proxy" || pending?.kind === "tailnetOn" ? "primary" : "danger"}
+          title={dialog.title}
+          description={
+            <div className="space-y-1.5">
+              {dialog.lines.filter(Boolean).map((l) => (
+                <p key={l}>{l}</p>
+              ))}
+            </div>
+          }
+          confirmLabel={dialog.confirm}
+          onConfirm={go}
+        >
+          {pending?.kind === "public" && moving.length ? (
+            <Switch
+              checked={move}
+              onChange={setMove}
+              label={moving.length === 1 ? "Move it to the tunnel first" : "Move them to the tunnel first"}
+              description="Public ports close once they're all on the tunnel."
+            />
+          ) : null}
+          {pending?.kind === "public" && hasPorts ? (
+            <Switch checked={ports} onChange={setPorts} label="Publish TCP and UDP ports" description="On every server except build-only servers." />
+          ) : null}
+          {pending?.kind === "tunnel" && moving.length ? (
+            <Switch checked={restore} onChange={setRestore} label="Put back the records it replaced" />
+          ) : null}
+        </ConfirmDialog>
       ) : null}
     </Panel>
   );
+}
+
+/** One label under the tunnel's default domain: no direct record to go back to. */
+function domainUnderDefault(host: string, c: Cluster) {
+  const dd = c.tunnel?.defaultDomain?.toLowerCase();
+  const h = host.toLowerCase();
+  return !!dd && h.endsWith(`.${dd}`) && !h.slice(0, -dd.length - 1).includes(".");
 }
