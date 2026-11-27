@@ -3,13 +3,13 @@
 # outside any cluster. Pyo's "Add a sandbox server" gives you the command:
 #
 #   curl -fsSL https://your-pyo/install/sandbox.sh | bash -s -- \
-#     --pyo pyo.tail1234.ts.net:5006 --server sbs_abc123 --name sbx-1 \
-#     --code 9f2c... --tailscale-key tskey-auth-... --version 0.4.0
+#     --pyo-url https://pyo.tail1234.ts.net --command-key AbC... \
+#     --server sbs_abc123 --name sbx-1 --code 9f2c... \
+#     --tailscale-key tskey-auth-... --version 0.52.0
 #
-#   --pyo            Pyo's tailnet door, where servers joined before 0.51.1
-#   --pyo-url        Pyo's address instead: the server joins and gets its
-#                    work over HTTPS (outbound mode, every new server)
-#   --command-key    with --pyo-url: the keys Pyo signs its commands with
+#   --pyo-url        Pyo's address: the server joins and gets its work
+#                    over HTTPS, outbound only
+#   --command-key    the keys Pyo signs its commands with
 #   --server         this server's ID in Pyo
 #   --name           its name on the tailnet
 #   --code           a one-time join code, valid 15 minutes
@@ -31,15 +31,15 @@
 #                    KVM. Checked against the signed release.json of
 #                    --version, or not at all with --dev.
 #
-# New servers get --pyo-url and --command-key instead of --pyo. The server
-# joins the tailnet with the key, gets an HTTPS certificate for its name
-# there (renewed by a timer), and the daemon joins Pyo over HTTPS. It
-# answers browsers on the tailnet at https://<name>.<tailnet>.ts.net:7443.
-# A server that joined with --pyo before moves over when it runs such a
-# command (Update in Pyo).
+# The server joins the tailnet with the key, gets an HTTPS certificate for
+# its name there (renewed by a timer), and the daemon joins Pyo over HTTPS.
+# Pyo never connects to it. It answers browsers and SDKs on the tailnet at
+# https://<name>.<tailnet>.ts.net:7443.
 #
 # Run it again with --version to update the daemon. A server that has joined
-# needs no code then. Running sandboxes keep running.
+# needs no code then. Running sandboxes keep running. A server that joined
+# with --pyo before 0.52.0 needs the command from Update in Pyo instead:
+# this script no longer takes --pyo.
 #
 # Or take it off this machine (sandboxes end, Tailscale stays):
 #
@@ -49,9 +49,9 @@
 # Firecracker, its jailer and the guest kernel, and checks what this server
 # can run: Firecracker where it has KVM, gVisor elsewhere. A server without
 # KVM gets gVisor's runsc too, from pyo-sandbox-gvisor-linux-<arch>.tar.gz
-# beside the sandbox files, and is checked again. Then it trades
-# the code for the daemon's config at Pyo over the tailnet, and starts the
-# daemon. The daemon answers only on the tailnet.
+# beside the sandbox files, and is checked again. Then the daemon trades
+# the code for its config at Pyo, and starts. The daemon answers only on
+# the tailnet.
 #
 # This server's own settings go in /etc/pyo-sandbox/local.json: the
 # sandboxes' network (their address pool, DNS and blocked ranges) and, with
@@ -356,7 +356,7 @@ RELEASE_SIGNER='^https://github\.com/upsetdev/pyo/\.github/workflows/release\.ym
 RELEASE_ISSUER=https://token.actions.githubusercontent.com
 
 defaults() {
-  PYO="" SERVER="" NAME="" CODE="" VERSION=${PYO_VERSION:-} BUNDLE=${PYO_SANDBOX_BUNDLE:-}
+  SERVER="" NAME="" CODE="" VERSION=${PYO_VERSION:-} BUNDLE=${PYO_SANDBOX_BUNDLE:-}
   BUNDLE_SHA256=${PYO_SANDBOX_BUNDLE_SHA256:-} DEV=${PYO_SANDBOX_DEV:-}
   GVISOR_BUNDLE=${PYO_SANDBOX_GVISOR_BUNDLE:-} RUNTIME="" KVM="" BOOT="" REASON=""
   TS_AUTHKEY=${TS_AUTHKEY:-} UNINSTALL="" PYO_URL="" COMMAND_KEY=""
@@ -364,7 +364,7 @@ defaults() {
   LIB=/usr/local/lib/pyo-sandbox BIN=/usr/local/bin/pyo-sandbox
   ETC=/etc/pyo-sandbox DATA=/var/lib/pyo-sandbox
   UNIT=/etc/systemd/system/pyo-sandbox.service
-  PORT=7070 WORK="" TS_IP="" JAIL_UID="" JAIL_GID=""
+  OLD_PORT=7070 WORK="" TS_IP="" JAIL_UID="" JAIL_GID=""
   TLS_PORT=7443 TS_NAME="" TS_HOST=""
   CERT_UNIT=/etc/systemd/system/pyo-sandbox-cert
   EDGE_DOMAIN=${PYO_SANDBOX_EDGE_DOMAIN:-} EDGE_CERT="" EDGE_KEY=""
@@ -380,7 +380,7 @@ fail() {
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      --pyo) PYO="${2:-}"; shift 2 ;;
+      --pyo) needs_update ;;
       --pyo-url) PYO_URL="${2:-}"; shift 2 ;;
       --command-key) COMMAND_KEY="${2:-}"; shift 2 ;;
       --server) SERVER="${2:-}"; shift 2 ;;
@@ -397,8 +397,7 @@ parse_args() {
       --edge-key) EDGE_KEY="${2:-}"; shift 2 ;;
       --uninstall) UNINSTALL=1; shift ;;
       -h | --help)
-        echo "Usage: sandbox.sh --pyo HOST:PORT --server ID --name NAME --code CODE --version X [--tailscale-key KEY]"
-        echo "       sandbox.sh --pyo-url URL --command-key KEYS --server ID --name NAME --code CODE --version X --tailscale-key KEY"
+        echo "Usage: sandbox.sh --pyo-url URL --command-key KEYS --server ID --name NAME --code CODE --version X --tailscale-key KEY"
         echo "                  [--bundle FILE|URL [--bundle-sha256 SUM | --dev]] [--gvisor-bundle FILE|URL]"
         echo "                  [--edge-domain DOMAIN [--edge-cert FILE] [--edge-key FILE]]"
         echo "       sandbox.sh --uninstall"
@@ -425,20 +424,14 @@ parse_args() {
   if [ -z "$CODE" ] && joined; then
     return 0
   fi
-  [ -z "$PYO" ] || [ -z "$PYO_URL" ] || fail "Copy the full command from Pyo: it has --pyo or --pyo-url, not both."
-  if [ -n "$PYO_URL" ]; then
-    [ -n "$SERVER" ] && [ -n "$NAME" ] && [ -n "$CODE" ] && [ -n "$COMMAND_KEY" ] ||
-      fail "Copy the full command from Pyo: it has --pyo-url, --command-key, --server, --name and --code."
-    PYO_URL=${PYO_URL%/}
-    [[ $PYO_URL =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]] ||
-      tailnet_url "$PYO_URL" ||
-      { [ -n "$DEV" ] && [[ $PYO_URL =~ ^http://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]]; } ||
-      fail "\"$PYO_URL\" isn't Pyo's HTTPS address. Copy the full command from Pyo."
-    [[ $COMMAND_KEY =~ ^[A-Za-z0-9_-]{16,128}(,[A-Za-z0-9_-]{16,128}){0,7}$ ]] || fail "The command key is wrong. Copy the full command from Pyo."
-  else
-    [ -n "$PYO" ] && [ -n "$SERVER" ] && [ -n "$NAME" ] && [ -n "$CODE" ] || fail "Copy the full command from Pyo: it has --pyo, --server, --name and --code."
-    [ -z "$COMMAND_KEY" ] || fail "--command-key goes with --pyo-url."
-  fi
+  [ -n "$PYO_URL" ] && [ -n "$SERVER" ] && [ -n "$NAME" ] && [ -n "$CODE" ] && [ -n "$COMMAND_KEY" ] ||
+    fail "Copy the full command from Pyo: it has --pyo-url, --command-key, --server, --name and --code."
+  PYO_URL=${PYO_URL%/}
+  [[ $PYO_URL =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]] ||
+    tailnet_url "$PYO_URL" ||
+    { [ -n "$DEV" ] && [[ $PYO_URL =~ ^http://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]]; } ||
+    fail "\"$PYO_URL\" isn't Pyo's HTTPS address. Copy the full command from Pyo."
+  [[ $COMMAND_KEY =~ ^[A-Za-z0-9_-]{16,128}(,[A-Za-z0-9_-]{16,128}){0,7}$ ]] || fail "The command key is wrong. Copy the full command from Pyo."
   [[ $SERVER =~ ^[a-z0-9_]{1,64}$ ]] || fail "\"$SERVER\" isn't a sandbox server ID."
   [[ $CODE =~ ^[0-9a-f]{16,256}$ ]] || fail "The join code is wrong. Copy the full command from Pyo."
   [[ $NAME =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || fail "\"$NAME\" isn't a server name: lowercase letters, digits and dashes."
@@ -453,6 +446,12 @@ tailnet_url() {
 
 # Joined before: the daemon's config is there.
 joined() { [ -s "${ETC:-/etc/pyo-sandbox}/config.json" ]; }
+
+# A server that joined at Pyo's tailnet door before 0.52.0 (--pyo): Pyo
+# no longer calls it, and this script no longer joins that way.
+needs_update() {
+  fail "This server joined Pyo the old way and needs an update. Press Update on it in Pyo, then run the command it shows here."
+}
 
 # Root, or again with sudo. Piped from curl there's no file to run again, so
 # the script travels as its functions plus the settings it sets outside them
@@ -622,12 +621,11 @@ join_tailnet() {
   tailnet_lock_wait
   TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
   [ -n "$TS_IP" ] || fail "This machine didn't join your tailnet. Copy a fresh command from Pyo and run it again."
-  [ -z "$PYO" ] || PYO=$(tailnet_hostport "$PYO")
-  [ -z "$PYO_URL" ] || tailnet_self
+  tailnet_self
 }
 
-# Outbound: the server is one of Pyo's on the team's tailnet (tag:pyo), and
-# its names there into TS_HOST and TS_NAME. A machine that was on another
+# The server is one of Pyo's on the team's tailnet (tag:pyo), and its
+# names there into TS_HOST and TS_NAME. A machine that was on another
 # tailnet before isn't moved.
 tailnet_self() {
   local js
@@ -640,10 +638,11 @@ tailnet_self() {
   [ -n "$TS_HOST" ] && [[ $TS_NAME == *.* ]] || fail "This machine has no name on your tailnet yet. Run the same command again in a minute."
 }
 
-# Outbound: whether this server joined Pyo over HTTPS, from its config.
+# Whether this server works for Pyo over HTTPS: joining now, or joined
+# that way, from its config. Every server since 0.52.0.
 outbound() { [ -n "$PYO_URL" ] || grep -q '"outbound"' "$ETC/config.json" 2>/dev/null; }
 
-# Outbound: the HTTPS certificate for the server's tailnet name, where the
+# The HTTPS certificate for the server's tailnet name, where the
 # daemon serves browsers on the tailnet (:7443). The daemon picks up a new
 # one by itself.
 cert_get() {
@@ -655,7 +654,7 @@ tailnet_cert() {
     fail "Couldn't get an HTTPS certificate for $TS_NAME. Turn on HTTPS certificates in your tailnet's DNS settings, then run the same command again."
 }
 
-# Outbound: a timer that renews the certificate twice a day. tailscale cert
+# A timer that renews the certificate twice a day. tailscale cert
 # gets a new one only when it's close to running out.
 write_cert_units() {
   cat > "$CERT_UNIT.service.new" <<UNIT
@@ -688,7 +687,7 @@ UNIT
   systemctl enable --now pyo-sandbox-cert.timer >/dev/null 2>&1 || true
 }
 
-# Outbound: the daemon joins Pyo over HTTPS. The code and the command key
+# The daemon joins Pyo over HTTPS. The code and the command key
 # go to it in a root-only file, never in its arguments. It makes its own
 # key, trades the code for its config and writes it, and waits while the
 # tailnet doesn't list this server yet. Its last line says why when it
@@ -745,7 +744,7 @@ install_files() {
 # A config for the detection alone: no keys, nothing listens.
 detect_config() {
   cat <<CFG
-{"serverId": "detect", "listen": "127.0.0.1:$PORT", "root": "$DATA",
+{"serverId": "detect", "listen": "127.0.0.1:$OLD_PORT", "root": "$DATA",
  "firecracker": "$LIB/firecracker", "jailer": "$LIB/jailer", "kernel": "$LIB/vmlinux",
  "envd": "$LIB/pyo-envd", "runsc": "$LIB/runsc", "keys": [], "jailUid": $JAIL_UID, "jailGid": $JAIL_GID}
 CFG
@@ -783,52 +782,6 @@ detect() {
     gvisor:*) dot_line yellow "gVisor, because this server has no usable KVM." ;;
     *) fail "This server can't run sandboxes. ${REASON:-It has neither KVM nor gVisor.}" ;;
   esac
-}
-
-# The code for the daemon's config, at Pyo's tailnet door. Tried again
-# while Pyo can't be reached (with Tailnet Lock on, until the key is
-# signed). The first answer burns the code.
-redeem() {
-  local out status body deadline=$((SECONDS + 600))
-  {
-    printf '{"code": "%s", "address": "%s", "jailUid": %s, "jailGid": %s, "capability": ' "$CODE" "$TS_IP" "$JAIL_UID" "$JAIL_GID"
-    cat "$WORK/capability.json"
-    printf '}\n'
-  } > "$WORK/ask.json"
-  progress_start "Joining Pyo as $NAME…"
-  while :; do
-    out=$(curl -sS -m 30 -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
-      --data-binary "@$WORK/ask.json" "http://$PYO/sandbox/join?server=$SERVER" 2>&1) || true
-    status=${out##*$'\n'} body=${out%$'\n'*}
-    case "$status" in
-      200) break ;;
-      000 | 429 | 5??) ;;
-      *) fail "$(refusal "$body")" ;;
-    esac
-    [ "$SECONDS" -lt "$deadline" ] || fail "Pyo didn't answer over your tailnet in 10 minutes. Check that Pyo is running, then run the same command again."
-    sleep 5
-    progress_tick
-  done
-  progress_end
-  rm -f "$WORK/ask.json"
-  case "$body" in
-    *"\"serverId\":\"$SERVER\""* | *"\"serverId\": \"$SERVER\""*) ;;
-    *) fail "Pyo's answer isn't this server's config. Copy a fresh command from Pyo and run it again." ;;
-  esac
-  (umask 077 && printf '%s\n' "$body" > "$ETC/config.json.new")
-  mv -f "$ETC/config.json.new" "$ETC/config.json"
-}
-
-# Why Pyo refused, in its own words when it gave some (its JSON error, or a
-# short line of text), else in a plain sentence.
-refusal() {
-  local why
-  why=$(sed -n 's/.*"error": *"\([^"\\]*\)".*/\1/p' <<<"$1" | head -n1)
-  if [ -z "$why" ] && [ "${#1}" -le 200 ] && [[ $1 != *[{}\<]* ]]; then
-    why=$(head -n1 <<<"$1")
-  fi
-  [ -n "$why" ] || why="It didn't say why. Copy a fresh command from Pyo and run it again."
-  printf 'Pyo refused this server. %s\n' "$why"
 }
 
 # This server's own settings for the daemon: the sandboxes' network and,
@@ -890,12 +843,13 @@ UNIT
   mv -f "$UNIT.new" "$UNIT"
 }
 
-# The daemon over the tailnet only, and the edge proxy (80 and 443) to
-# everyone when it's on. Only ufw is managed here.
+# The daemon over the tailnet only (HTTPS, :7443), and the edge proxy (80
+# and 443) to everyone when it's on. Only ufw is managed here. The plain
+# HTTP port Pyo called before 0.52.0 closes.
 firewall() {
   if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-    ufw allow in on tailscale0 to any port "$PORT" proto tcp comment 'Pyo sandbox daemon over Tailscale' >/dev/null
-    ! outbound || ufw allow in on tailscale0 to any port "$TLS_PORT" proto tcp comment 'Pyo sandbox daemon over Tailscale' >/dev/null
+    ufw allow in on tailscale0 to any port "$TLS_PORT" proto tcp comment 'Pyo sandbox daemon over Tailscale' >/dev/null
+    ufw delete allow in on tailscale0 to any port "$OLD_PORT" proto tcp >/dev/null 2>&1 || true
     if edge_on; then
       ufw allow "$EDGE_HTTP/tcp" comment 'Pyo sandbox edge' >/dev/null
       ufw allow "$EDGE_HTTPS/tcp" comment 'Pyo sandbox edge' >/dev/null
@@ -905,8 +859,10 @@ firewall() {
   fi
 }
 
-# The daemon answers its health check on the tailnet.
-daemon_up() { curl -fsS -m 2 "http://$TS_IP:$PORT/v1/health" >/dev/null 2>&1; }
+# The daemon answers its health check over HTTPS on its tailnet name.
+daemon_up() {
+  curl -fsS -m 2 --resolve "$TS_NAME:$TLS_PORT:$TS_IP" "https://$TS_NAME:$TLS_PORT/v1/health" >/dev/null 2>&1
+}
 
 # Its log shows only when it doesn't start.
 start_daemon() {
@@ -955,7 +911,7 @@ uninstall() {
   systemctl daemon-reload || true
   rm -rf "$LIB" "$ETC" "$DATA"
   if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-    ufw delete allow in on tailscale0 to any port "$PORT" proto tcp >/dev/null 2>&1 || true
+    ufw delete allow in on tailscale0 to any port "$OLD_PORT" proto tcp >/dev/null 2>&1 || true
     ufw delete allow in on tailscale0 to any port "$TLS_PORT" proto tcp >/dev/null 2>&1 || true
     # Only the edge rules this script added: they carry its comment.
     if ufw status | grep -q "Pyo sandbox edge"; then
@@ -979,30 +935,27 @@ main() {
     uninstall
     return 0
   fi
+  # A server from before 0.52.0 joins again with its Update command.
+  outbound || needs_update
   check_system
   WORK=$(mktemp -d)
   trap cleanup EXIT
   fetch_bundle
   join_tailnet
-  if outbound; then
-    [ -n "$TS_NAME" ] || tailnet_self
-    tailnet_cert
-  fi
+  tailnet_cert
   make_user
   install_files
   # A gVisor server's runsc follows the release too.
   [ ! -x "$LIB/runsc" ] || add_gvisor
   detect
-  if [ -n "$CODE" ] && [ -n "$PYO_URL" ]; then
+  if [ -n "$CODE" ]; then
     join_outbound
-  elif [ -n "$CODE" ]; then
-    redeem
   else
     say "Joined before: updating the daemon"
   fi
   write_local_config
   write_unit
-  ! outbound || write_cert_units
+  write_cert_units
   firewall
   start_daemon
   if [ -n "$CODE" ]; then

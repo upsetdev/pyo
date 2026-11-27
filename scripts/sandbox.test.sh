@@ -36,19 +36,23 @@ set +e
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 code=$(printf '%064d' 7)
-args=(--pyo pyo.tail1234.ts.net:5006 --server sbs_abc123 --name sbx-1 --code "$code" --tailscale-key tskey-auth-x --version 0.4.0)
+ckey=$(printf 'k%.0s' {1..43})
+args=(--pyo-url https://pyo.tail1234.ts.net --command-key "$ckey" --server sbs_abc123 --name sbx-1 --code "$code" --tailscale-key tskey-auth-x --version 0.4.0)
 
 # ── Options ──
 defaults
 ETC=$tmp/etc
 out=$( (parse_args "${args[@]}" && echo "parsed $SERVER $NAME $VERSION") 2>&1)
 check "the full command parses" "$out" "^parsed sbs_abc123 sbx-1 0.4.0$" has
-out=$( (defaults; ETC=$tmp/etc; parse_args --pyo x:1 --server sbs_a --name n --version 0.4.0) 2>&1)
+out=$( (defaults; ETC=$tmp/etc; parse_args --pyo-url https://p.example --command-key "$ckey" --server sbs_a --name n --version 0.4.0) 2>&1)
 check "a first join needs a code" "$out" "Copy the full command from Pyo" has
-out=$( (defaults; ETC=$tmp/etc; parse_args --pyo x:1 --server sbs_a --name n --code 'abc;rm' --version 0.4.0) 2>&1)
+out=$( (defaults; ETC=$tmp/etc; parse_args --pyo-url https://p.example --command-key "$ckey" --server sbs_a --name n --code 'abc;rm' --version 0.4.0) 2>&1)
 check "a code is hex only" "$out" "join code is wrong" has
-out=$( (defaults; ETC=$tmp/etc; parse_args --pyo x:1 --server sbs_a --name Bad_Name --code "$code" --version 0.4.0) 2>&1)
+out=$( (defaults; ETC=$tmp/etc; parse_args --pyo-url https://p.example --command-key "$ckey" --server sbs_a --name Bad_Name --code "$code" --version 0.4.0) 2>&1)
 check "names are DNS labels" "$out" "isn't a server name" has
+# A command from before 0.52.0: the server needs its Update command.
+out=$( (defaults; ETC=$tmp/etc; parse_args --pyo pyo.tail1234.ts.net:5006 --server sbs_a --name n --code "$code" --version 0.4.0) 2>&1)
+check "--pyo is refused with what to do" "$out" "needs an update. Press Update on it in Pyo, then run the command it shows here\.$" has
 out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --code "$code") 2>&1)
 check "a release or a bundle is needed" "$out" "--version" has
 (defaults; parse_args --not-an-option) >/dev/null 2>&1
@@ -60,15 +64,14 @@ out=$( (defaults; ETC=$tmp/etc; parse_args --version 0.4.1 && echo updating) 2>&
 check "a joined server updates without a code" "$out" "^updating$" has
 rm -f "$tmp/etc/config.json"
 
-# ── New servers: --pyo-url and --command-key instead of --pyo ──
-ckey=$(printf 'k%.0s' {1..43})
+# ── Pyo's address and command key ──
 cloud=(--pyo-url https://agent.pyo.example --server sbs_abc123 --name sbx-1 --code "$code" --tailscale-key tskey-auth-x --command-key "$ckey,$ckey" --version 0.51.1)
 out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" && echo "parsed $PYO_URL $SERVER $NAME $COMMAND_KEY") 2>&1)
 check "the Cloud command parses" "$out" "^parsed https://agent.pyo.example sbs_abc123 sbx-1 $ckey,$ckey$" has
 out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --edge-domain sbx.example.com && echo "edge=$EDGE_DOMAIN") 2>&1)
 check "and takes an edge domain" "$out" "^edge=sbx.example.com$" has
 out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo x:1) 2>&1)
-check "--pyo and --pyo-url don't go together" "$out" "--pyo or --pyo-url, not both" has
+check "--pyo isn't taken with --pyo-url either" "$out" "needs an update" has
 out=$( (defaults; ETC=$tmp/etc; parse_args --pyo-url https://agent.pyo.example --server sbs_a --name n --code "$code" --version 0.51.1) 2>&1)
 check "--pyo-url needs the command key" "$out" "it has --pyo-url, --command-key" has
 out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url http://agent.pyo.example) 2>&1)
@@ -83,8 +86,8 @@ out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url http://100.64
 check "nor with a path" "$out" "isn't Pyo's HTTPS address" has
 out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --command-key 'abc;rm -rf') 2>&1)
 check "the command key is base64url" "$out" "command key is wrong" has
-out=$( (defaults; ETC=$tmp/etc; parse_args "${args[@]}" --command-key "$ckey") 2>&1)
-check "--command-key goes with --pyo-url" "$out" "goes with --pyo-url" has
+out=$( (defaults; ETC=$tmp/etc; parse_args --pyo-url https://agent.pyo.example --server sbs_a --name n --code "$code" --version 0.4.0) 2>&1)
+check "--pyo-url needs --command-key" "$out" "it has --pyo-url, --command-key" has
 out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url https://agent.pyo.example/ && echo "url=$PYO_URL") 2>&1)
 check "a trailing slash is dropped" "$out" "^url=https://agent.pyo.example$" has
 
@@ -110,11 +113,11 @@ mkdir -p "$WORK"
 out=$( (fetch_bundle && ls "$WORK/bundle") 2>&1)
 check "--dev uses a local bundle unchecked" "$out" "vmlinux" has
 check "and says so" "$out" "aren't checked \\(--dev\\)" has
-out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --name n --code "$code" --pyo x:1 --bundle "$tmp/bundle.tar.gz") 2>&1)
+out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --name n --code "$code" --pyo-url https://p.example --command-key "$ckey" --bundle "$tmp/bundle.tar.gz") 2>&1)
 check "--bundle alone is refused" "$out" "--bundle needs a checksum" has
-out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --name n --code "$code" --pyo x:1 --bundle "$tmp/bundle.tar.gz" --dev && echo parsed) 2>&1)
+out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --name n --code "$code" --pyo-url https://p.example --command-key "$ckey" --bundle "$tmp/bundle.tar.gz" --dev && echo parsed) 2>&1)
 check "--bundle with --dev parses" "$out" "^parsed$" has
-out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --name n --code "$code" --pyo x:1 --bundle "$tmp/bundle.tar.gz" --bundle-sha256 nothex) 2>&1)
+out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --name n --code "$code" --pyo-url https://p.example --command-key "$ckey" --bundle "$tmp/bundle.tar.gz" --bundle-sha256 nothex) 2>&1)
 check "--bundle-sha256 is a sha256" "$out" "64 hex digits" has
 rm "$tmp/b/jailer" && tar -czf "$tmp/short.tar.gz" -C "$tmp/b" .
 WORK=$tmp/work2 BUNDLE=$tmp/short.tar.gz DEV=1
@@ -279,21 +282,22 @@ check "and stops" "$out" "went on" lacks
 
 # ── Joining the tailnet ──
 defaults
-NAME=sbx-1 TS_AUTHKEY=tskey-auth-x PYO=100.64.0.1:5006
+NAME=sbx-1 TS_AUTHKEY=tskey-auth-x PYO_URL=https://pyo.tail1234.ts.net
 systemctl() { :; }
 tailnet_lock_wait() { :; }
 tailscale() {
   case "$1" in
     ip) [ ! -f "$tmp/ts-up" ] || echo 100.64.0.9 ;;
     up) echo "Some peers are advertising routes" >&2; [ -z "${ts_fails:-}" ] && touch "$tmp/ts-up" ;;
+    status) printf '{\n  "Self": {\n    "HostName": "sbx-1",\n    "DNSName": "sbx-1.tail1234.ts.net.",\n    "Tags": ["tag:pyo"]\n  }\n}\n' ;;
   esac
   return 0
 }
 rm -f "$tmp/ts-up"
-out=$( (join_tailnet && echo "ip=$TS_IP pyo=$PYO") 2>&1)
+out=$( (join_tailnet && echo "ip=$TS_IP") 2>&1)
 check "joining the tailnet shows progress" "$out" "^→ Joining your tailnet…$" has
 check "and hides Tailscale's own output" "$out" "advertising" lacks
-check "and gets this server's address" "$out" "^ip=100.64.0.9 pyo=100.64.0.1:5006$" has
+check "and gets this server's address" "$out" "^ip=100.64.0.9$" has
 rm -f "$tmp/ts-up"
 out=$( (ts_fails=1 join_tailnet) 2>&1)
 check "a failed join says to run a fresh command" "$out" "didn't join your tailnet. Copy a fresh command from Pyo and run it again\.$" has
@@ -387,62 +391,20 @@ check "Cloud: a refusal shows the daemon's last line" "$out" $'^✗ Joining Pyo 
 check "Cloud: and none of its log" "$out" "WARN|pyo_sandbox" lacks
 check "Cloud: and stops" "$out" "went on" lacks
 check "Cloud: the join file is gone after a refusal too" "$(ls "$ETC")" "join.json" lacks
-check "Cloud: self-hosted isn't outbound" "$( (PYO_URL=""; outbound || echo direct) 2>&1)" "^direct$" has
+check "Cloud: a server from the door isn't outbound" "$( (PYO_URL=""; outbound || echo door) 2>&1)" "^door$" has
 unset -f sleep
-
-# ── Joining Pyo ──
-sleep() { :; }
-curl() {
-  local a
-  for a in "$@"; do case "$a" in @*) cp "${a#@}" "$tmp/asked.json" ;; http*) echo "$a" >"$tmp/url" ;; esac; done
-  printf "%s\n%s" "$fake_body" "$fake_code"
-}
-defaults
-ETC=$tmp/etc2 WORK=$tmp/work4 PYO=100.64.0.1:5006 SERVER=sbs_abc123 NAME=sbx-1 CODE=$code TS_IP=100.64.0.9 JAIL_UID=998 JAIL_GID=997
-mkdir -p "$ETC" "$WORK"
-printf '{\n  "runtime": "firecracker"\n}\n' >"$WORK/capability.json"
-fake_body='{"serverId":"sbs_abc123","listen":"100.64.0.9:7070","keys":[]}' fake_code=200
-out=$( (redeem) 2>&1)
-check "the code is traded for the config" "$(cat "$ETC/config.json" 2>/dev/null)" '"listen":"100.64.0.9:7070"' has
-check "at Pyo's tailnet door, for this server" "$(cat "$tmp/url")" "^http://100.64.0.1:5006/sandbox/join\?server=sbs_abc123$" has
-check "with the code, address, user and report" "$(cat "$tmp/asked.json")" "\"code\": \"$code\", \"address\": \"100.64.0.9\", \"jailUid\": 998, \"jailGid\": 997, \"capability\": \{" has
-check "the config is root's only" "$(stat -c %a "$ETC/config.json")" "^600$" has
-check "the ask is valid JSON" "$(python3 -c 'import json,sys; json.load(open(sys.argv[1])); print("json")' "$tmp/asked.json" 2>&1)" "^json$" has
-rm -f "$ETC/config.json"
-fake_body='This code expired. Make a new one in Pyo.' fake_code=403
-out=$( (redeem) 2>&1)
-check "a refusal is shown as Pyo says it" "$out" "Pyo refused this server. This code expired. Make a new one in Pyo." has
-fake_body='{"error":"This join code was used already."}' fake_code=409
-out=$( (redeem) 2>&1)
-check "a JSON refusal shows only its words" "$out" "Pyo refused this server. This join code was used already.$" has
-check "and writes no config" "$(ls "$ETC")" "config.json" lacks
-fake_body='{"serverId":"sbs_other"}' fake_code=200
-out=$( (redeem) 2>&1)
-check "another server's config is refused" "$out" "isn't this server's config" has
-fake_body='{"serverId":"sbs_abc123"}' fake_code=200
-out=$( (redeem) 2>&1)
-check "joining Pyo shows progress" "$out" "^→ Joining Pyo as sbx-1…$" has
-check "then that it joined" "$out" "^✓ Joined Pyo as sbx-1$" has
-# Pyo out of reach: the wait ends after 10 minutes, without curl's words.
-sleep() { SECONDS=$((SECONDS + ${1%.*})); }
-fake_body='curl: (7) Failed to connect' fake_code=000
-out=$( (redeem) 2>&1)
-check "an unreachable Pyo says what to do" "$out" "didn't answer over your tailnet in 10 minutes. Check that Pyo is running, then run the same command again\.$" has
-check "and not curl's error" "$out" "curl:" lacks
-check "the wait shows every 20 seconds in a log" "$out" "^→ Joining Pyo as sbx-1… 0:20$" has
-check "then that it failed" "$out" $'^✗ Joining Pyo as sbx-1\nError: Pyo didn\'t answer' has
-unset -f curl sleep
 
 # ── Starting the daemon ──
 defaults
-TS_IP=100.64.0.9
+TS_IP=100.64.0.9 TS_NAME=sbx-1.tail1234.ts.net
 systemctl() { :; }
 journalctl() { echo "pyo-sandbox: bad config"; }
 sleep() { SECONDS=$((SECONDS + ${1%.*})); }
-curl() { [ -f "$tmp/up" ]; }
+curl() { echo "$*" >"$tmp/health-args"; [ -f "$tmp/up" ]; }
 touch "$tmp/up"
 out=$( (start_daemon && echo started) 2>&1)
 check "a daemon that's up at once: nothing but done" "$out" "^started$" has
+check "its health over HTTPS on its tailnet name" "$(cat "$tmp/health-args")" "--resolve sbx-1.tail1234.ts.net:7443:100.64.0.9 https://sbx-1.tail1234.ts.net:7443/v1/health$" has
 check "and no log" "$out" "bad config" lacks
 rm -f "$tmp/up"
 out=$( (start_daemon && echo started) 2>&1)
@@ -509,7 +471,9 @@ ufw() {
 ufw_state=active
 rm -f "$tmp/ufw"
 firewall
-check "ufw: the daemon on the tailnet" "$(cat "$tmp/ufw")" "ufw allow in on tailscale0 to any port 7070 proto tcp" has
+check "ufw: the daemon over HTTPS on the tailnet" "$(cat "$tmp/ufw")" "ufw allow in on tailscale0 to any port 7443 proto tcp" has
+check "ufw: the old plain HTTP port closes" "$(cat "$tmp/ufw")" "ufw delete allow in on tailscale0 to any port 7070 proto tcp" has
+check "ufw: and isn't opened" "$(cat "$tmp/ufw")" "ufw allow in on tailscale0 to any port 7070" lacks
 check "ufw: the edge's ports" "$(cat "$tmp/ufw")" "ufw allow 80/tcp comment Pyo sandbox edge" has
 check "ufw: and 443" "$(cat "$tmp/ufw")" "ufw allow 443/tcp" has
 echo '{"network": {}}' >"$ETC/local.json"
@@ -522,16 +486,25 @@ rm -f "$tmp/ufw"
 out=$(firewall 2>&1)
 check "without ufw, it says which ports to open" "$out" "open TCP 80 and 443" has
 check "and changes no firewall" "$(cat "$tmp/ufw")" "allow" lacks
-# Outbound: the HTTPS port on the tailnet too.
-ufw_state=active
-echo '{"outbound": {}}' >"$ETC/config.json"
-rm -f "$tmp/ufw"
-firewall
-check "ufw: Cloud, HTTPS on the tailnet" "$(cat "$tmp/ufw")" "ufw allow in on tailscale0 to any port 7443 proto tcp" has
-rm -f "$ETC/config.json" "$tmp/ufw"
-firewall
-check "ufw: self-hosted, no 7443" "$(cat "$tmp/ufw")" "7443" lacks
 unset -f ufw
+
+# ── A server from the door: Update first ──
+# main as root, with this server's config in $tmp/etc-door, up to the checks.
+door_main() (
+  check_system() { echo "went on"; }
+  become_root() { :; }
+  eval "real_$(declare -f defaults)"
+  defaults() { real_defaults; ETC=$tmp/etc-door; }
+  main "$@"
+)
+mkdir -p "$tmp/etc-door"
+echo '{"serverId": "sbs_old", "listen": "100.64.0.9:7070", "keys": []}' >"$tmp/etc-door/config.json"
+out=$(door_main --version 0.52.0 2>&1)
+check "an update run on a server from the door says to press Update" "$out" "needs an update. Press Update on it in Pyo, then run the command it shows here\.$" has
+check "and changes nothing" "$out" "went on" lacks
+echo '{"serverId": "sbs_new", "outbound": {"pyoUrl": "https://pyo.tail1234.ts.net"}}' >"$tmp/etc-door/config.json"
+out=$(door_main --version 0.52.0 2>&1)
+check "an outbound server updates" "$out" "^went on$" has
 
 # ── sudo: the root shell gets the functions, SETTINGS and PYO_* ──
 bin=$tmp/fakebin
