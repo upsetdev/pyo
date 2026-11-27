@@ -113,6 +113,16 @@ pub fn domain_path(d: &Value, default_domain: Option<&str>) -> Path {
     Path::Public
 }
 
+/// Whether switching Tailnet changes the tailnet Gateway's HTTPS listener
+/// on the cluster Pyo runs on: services' ts.net routes carry their route
+/// policies (a rate limit), Pyo's own routes there don't. With every
+/// service's ts.net route gone, or back, the listener's filters change, so
+/// open connections to Pyo's dashboard on the tailnet drop once. On other
+/// clusters that listener only has services' names, which stop anyway.
+pub fn dashboard_drops(same_cluster: bool, domains: &[Domain]) -> bool {
+    same_cluster && domains.iter().any(|d| pyo_proto::system::is_tailnet_host(&d.hostname))
+}
+
 /// A domain listed in a confirm answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Listed {
@@ -368,6 +378,7 @@ pub async fn set(
             "domains": listed.iter().map(Listed::json).collect::<Vec<_>>(),
             "moving": listed.iter().filter(|l| l.path == Path::Public && l.outcome == "moves").count(),
             "publicDashboard": row.same_cluster && now.public && !want.public,
+            "dashboardDrops": now.tailnet != want.tailnet && dashboard_drops(row.same_cluster, &all),
             "hasPorts": has_ports(tx, cluster_id).await?,
         }));
     }
@@ -588,6 +599,7 @@ pub async fn set(
         "domains": listed.iter().map(Listed::json).collect::<Vec<_>>(),
         "moving": moving,
         "traffic": traffic,
+        "dashboardDrops": now.tailnet != want.tailnet && dashboard_drops(row.same_cluster, &all),
     }))
 }
 
@@ -730,6 +742,16 @@ mod tests {
         // A path that's already off lists nothing.
         let now = Paths { tailnet: false, ..ON };
         assert!(plan(now, now, &all, true).is_empty());
+    }
+
+    #[test]
+    fn the_tailnet_switch_drops_the_dashboard_only_where_pyo_runs_with_tsnet_names() {
+        let ts = [dom("blog.tail1234.ts.net", Path::Tailnet, false)];
+        let free = [dom("web.100.64.0.2.nip.io", Path::Tailnet, false)];
+        assert!(dashboard_drops(true, &ts));
+        assert!(!dashboard_drops(false, &ts), "another cluster: only the names that stop");
+        assert!(!dashboard_drops(true, &free), "its own listener, not the tailnet Gateway's");
+        assert!(!dashboard_drops(true, &[]));
     }
 
     #[test]
