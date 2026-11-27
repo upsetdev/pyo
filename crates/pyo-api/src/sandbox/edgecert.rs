@@ -35,7 +35,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use super::{Need, daemon::Daemon, keys};
+use super::{Need, daemon::Daemon};
 use crate::{
     AppState,
     auth::User,
@@ -733,24 +733,18 @@ async fn deliver(s: &AppState, id: &str) -> Result<(), String> {
     .fetch_optional(&s.db)
     .await
     .map_err(|e| e.to_string())?;
-    let Some((Some(address), Some(cert), Some(sealed))) = row else {
+    let Some((Some(_), Some(cert), Some(sealed))) = row else {
         return Err("The server hasn't joined, or there's no certificate.".into());
     };
     let key = crate::vault::get()
         .open_credential(&s.sealer, &sealed)
         .await
         .map_err(|_| "Pyo can't open the certificate's key.".to_owned())?;
-    let signing = keys::signing_key(&s.db, &s.sealer)
-        .await
-        .map_err(|e| e.message)?;
     let cmd = DaemonCommand::SetEdgeCert {
         cert,
         key: SecretPem(key),
     };
-    match Daemon::new(id, &address)
-        .command(&keys::admin_token(&signing, id), &cmd)
-        .await
-    {
+    match Daemon::new(id).command(&cmd).await {
         Ok(DaemonResult::EdgeCert { .. }) => Ok(()),
         Ok(other) => Err(format!("The server answered something else: {other:?}")),
         Err(e) => Err(e.message),

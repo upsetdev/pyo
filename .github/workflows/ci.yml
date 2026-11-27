@@ -153,9 +153,9 @@ jobs:
         run: cargo test --locked -p pyo-api --lib -- --ignored tailscale::tests
       # Sandbox servers on the outbound channel, on Pyo Cloud and
       # self-hosted: join codes, the join, the servers' keys and their
-      # command channel, Pyo's own signer, the installation's servers and
-      # servers moving from the door, with a stand-in holder agent. A run
-      # of its own, as above.
+      # command channel, Pyo's own signer, the installation's servers, and
+      # servers from the door, which take no commands until Update moves
+      # them, with a stand-in holder agent. A run of its own, as above.
       - name: Outbound sandbox servers (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
@@ -209,13 +209,12 @@ jobs:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: |
           cargo test --locked -p pyo-api --lib -- --ignored ratelimit::tests twofactor::tests cli::tests github::tests install:: cloud::bootstrap::tests
-      # Sandboxes: names, shared servers and templates, the door's join
-      # codes, the signing key and the base template (in a database of its
-      # own).
+      # Sandboxes: names, shared servers and templates, the signing key and
+      # the base template (in a database of its own).
       - name: Sandboxes (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
-        run: cargo test --locked -p pyo-api --lib -- --ignored sandbox::tests sandbox::join::tests sandbox::keys::tests sandbox::base::tests
+        run: cargo test --locked -p pyo-api --lib -- --ignored sandbox::tests sandbox::keys::tests sandbox::base::tests
       # Every migration on a new database of its own.
       - name: Migrations (Postgres)
         env:
@@ -374,6 +373,8 @@ jobs:
           PYO_SANDBOX_E2E_BASE_IMAGE=$(jq -r .images.base.ref crates/pyo-api/assets/sandbox-images/images.json)
           export PYO_SANDBOX_E2E_BASE_IMAGE
           cargo test --locked -p pyo-sandbox --test e2e --test template_e2e -- --nocapture
+      # Pyo's whole control plane against the daemon, over its channel:
+      # limits, placement, metering, templates from images and on first use.
       - name: pyo-api sandbox e2e
         env:
           PYO_SANDBOX_E2E: "1"
@@ -381,8 +382,8 @@ jobs:
         run: cargo test --locked -p pyo-api sandbox::e2e -- --nocapture
       # A sandbox server on Pyo Cloud: the daemon joins over HTTPS, takes
       # signed commands from Pyo's channel and serves HTTPS on its tailnet
-      # name, with a stand-in signer and tailnet. A run of its own: it
-      # sends Pyo's calls to sandbox servers through the channel.
+      # name, with a stand-in signer and tailnet. And a self-hosted one from
+      # before 0.52.0, moved over by its Update command. A run of its own.
       - name: pyo-api outbound sandbox e2e
         env:
           PYO_SANDBOX_E2E: "1"

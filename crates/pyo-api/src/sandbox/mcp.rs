@@ -137,7 +137,7 @@ async fn exec(
     let f = super::find(s, user, arg(args, "sandbox_id")?, Need::Use)
         .await
         .map_err(err)?;
-    let (d, token) = f.client(s).await.map_err(err)?;
+    let (d, _) = f.daemon().map_err(err)?;
     let req = ExecRequest {
         cmd,
         cwd: args["cwd"].as_str().map(str::to_owned),
@@ -145,7 +145,7 @@ async fn exec(
         stdin,
         timeout_ms: Some(args["timeout_ms"].as_u64().unwrap_or(60_000).min(600_000)),
     };
-    d.exec(&token, &f.id, &req)
+    d.exec(&f.id, &req)
         .await
         .map(exec_out)
         .map_err(|e| super::daemon_error(e).message)
@@ -213,9 +213,9 @@ pub async fn run(s: &AppState, user: &User, name: &str, args: &Value) -> Result<
             let f = super::find(s, user, arg(args, "sandbox_id")?, Need::Use)
                 .await
                 .map_err(err)?;
-            let (d, token) = f.client(s).await.map_err(err)?;
+            let (d, _) = f.daemon().map_err(err)?;
             let data = d
-                .read_file(&token, &f.id, arg(args, "path")?)
+                .read_file(&f.id, arg(args, "path")?)
                 .await
                 .map_err(|e| super::daemon_error(e).message)?;
             let truncated = data.len() > READ_CAP;
@@ -226,11 +226,10 @@ pub async fn run(s: &AppState, user: &User, name: &str, args: &Value) -> Result<
             let f = super::find(s, user, arg(args, "sandbox_id")?, Need::Use)
                 .await
                 .map_err(err)?;
-            let (d, token) = f.client(s).await.map_err(err)?;
+            let (d, _) = f.daemon().map_err(err)?;
             let content = args["content"].as_str().ok_or("content is required")?;
             let bytes = d
                 .write_file(
-                    &token,
                     &f.id,
                     arg(args, "path")?,
                     content.as_bytes().to_vec(),

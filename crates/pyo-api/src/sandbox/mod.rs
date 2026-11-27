@@ -14,9 +14,9 @@
 //!   [`base`]: Pyo's built-in template, kept in step with the release.
 //! - [`limits`]: per-team caps, checked on create.
 //! - [`names`]: sandboxes' names, made up when left out.
-//! - [`daemon`]: Pyo's calls to a daemon over the tailnet.
+//! - [`daemon`]: Pyo's calls to a daemon, over its channel.
 //! - [`edgecert`]: the edge proxies' wildcard certificates and DNS records.
-//! - [`runner`]: reads each server's report, keeps the records in step,
+//! - [`runner`]: keeps the records in step with each server's report,
 //!   meters usage and ends sandboxes past their lifetime.
 //! - [`api`]: the REST endpoints. [`mcp`]: the assistants' tools.
 //!
@@ -60,6 +60,11 @@ use crate::{
     error::{ApiError, ApiResult},
     ops::{Role, require_role},
 };
+
+/// What a server that joined at Pyo's tailnet door before 0.52.0 says: Pyo
+/// doesn't call sandbox servers any more, so it takes no commands until
+/// **Update** moves it to the outbound channel.
+pub const NEEDS_UPDATE: &str = "This server needs an update. Press Update to reconnect it.";
 
 /// "7d", "1h", "1h30m", "90s".
 pub fn format_ttl(secs: u64) -> String {
@@ -335,7 +340,8 @@ pub async fn sandbox_views_matching<'e, E: sqlx::PgExecutor<'e>>(
             'labels', coalesce(x.spec->'labels', '{}'),
             'pauseWhenIdleSecs', x.spec->'pauseWhenIdleSecs',
             'env', (SELECT coalesce(jsonb_agg(k ORDER BY k), '[]') FROM jsonb_object_keys(coalesce(x.spec->'env', '{}')) k),
-            'url', sv.address, 'tailnetUrl', CASE WHEN sv.outbound THEN sv.tailnet_name END,
+            'tailnetUrl', CASE WHEN sv.outbound THEN sv.tailnet_name END,
+            'serverNeedsUpdate', coalesce(NOT sv.outbound, false),
             'edgeUrl', sv.capability->>'edgeUrl', 'ports', x.ports,
             'error', x.error, 'createdBy', x.created_by,
             'createdAt', pyo.ms(x.created_at), 'startedAt', pyo.ms(x.started_at),
@@ -371,14 +377,13 @@ pub async fn sandbox_views_matching<'e, E: sqlx::PgExecutor<'e>>(
                 )
             });
         }
-        // The server's tailnet address as its daemon's URL (HTTPS on its
-        // tailnet name for one that joined over HTTPS), and each open
-        // port's URL on its edge proxy.
+        // The daemon's URL, HTTPS on its server's tailnet name (none for
+        // a server that needs an update), and each open port's URL on its
+        // edge proxy.
         for r in &mut rows {
-            r["url"] = match (r["tailnetUrl"].as_str(), r["url"].as_str()) {
-                (Some(name), _) => json!(outbound::tailnet_url(name)),
-                (None, Some(a)) => json!(daemon::base_url(a)),
-                (None, None) => Value::Null,
+            r["url"] = match r["tailnetUrl"].as_str() {
+                Some(name) => json!(outbound::tailnet_url(name)),
+                None => Value::Null,
             };
             if let Some(o) = r.as_object_mut() {
                 o.remove("tailnetUrl");
@@ -467,13 +472,13 @@ pub async fn template_views_live(
     id: Option<&str>,
 ) -> sqlx::Result<Vec<Value>> {
     let rows = template_rows(&s.db, team_ids, id).await?;
-    Ok(live_views(s, rows).await)
+    Ok(live_views(rows).await)
 }
 
 /// Template rows ([`template_rows`]) with how far each server got, asked
 /// of the servers still making one.
-pub(crate) async fn live_views(s: &AppState, mut rows: Vec<Value>) -> Vec<Value> {
-    live::overlay(s, &mut rows).await;
+pub(crate) async fn live_views(mut rows: Vec<Value>) -> Vec<Value> {
+    live::overlay(&mut rows).await;
     finish_template_views(&mut rows);
     rows
 }
@@ -719,11 +724,11 @@ async fn template_on(
     })
 }
 
-/// The servers a team's sandbox can go to, with their addresses.
+/// The servers a team's sandbox can go to.
 pub async fn candidates(
     tx: &mut PgConnection,
     team_id: &str,
-) -> ApiResult<Vec<(scheduler::Candidate, String)>> {
+) -> ApiResult<Vec<scheduler::Candidate>> {
     candidates_on(tx, team_id, shared()).await
 }
 
@@ -731,13 +736,14 @@ async fn candidates_on(
     tx: &mut PgConnection,
     team_id: &str,
     shared: bool,
-) -> ApiResult<Vec<(scheduler::Candidate, String)>> {
+) -> ApiResult<Vec<scheduler::Candidate>> {
     #[derive(sqlx::FromRow)]
     struct Row {
         id: String,
         name: String,
         team_id: Option<String>,
         address: Option<String>,
+        outbound: bool,
         state: String,
         enabled: bool,
         capability: Option<Value>,
@@ -747,7 +753,7 @@ async fn candidates_on(
         pending_mib: i64,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT s.id, s.name, s.team_id, s.address, s.state, s.enabled, s.capability, s.capacity, s.templates,
+        "SELECT s.id, s.name, s.team_id, s.address, s.outbound, s.state, s.enabled, s.capability, s.capacity, s.templates,
                 extract(epoch FROM now() - s.last_report_at)::bigint AS age,
                 coalesce((SELECT sum((x.spec->>'memoryMib')::bigint) FROM pyo.sandboxes x
                            WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed', 'paused')
@@ -762,14 +768,16 @@ async fn candidates_on(
     Ok(rows
         .into_iter()
         .map(|r| {
-            let c = scheduler::Candidate {
+            scheduler::Candidate {
                 id: r.id,
                 name: r.name,
                 team_id: r.team_id,
                 enabled: r.enabled,
-                // An outbound server (Pyo Cloud) gets its work as commands
-                // it polls for (outbound/channel.rs), through daemon.rs.
-                ready: r.state == "ready" && r.address.is_some(),
+                // It gets its work as commands it polls for
+                // (outbound/channel.rs), through daemon.rs. One that
+                // joined the old way gets none until it's updated.
+                ready: r.state == "ready" && r.address.is_some() && r.outbound,
+                needs_update: !r.outbound,
                 report_age_secs: r.age.unwrap_or(i64::MAX),
                 capability: r
                     .capability
@@ -781,8 +789,7 @@ async fn candidates_on(
                     .unwrap_or_default(),
                 templates: serde_json::from_value(r.templates).unwrap_or_default(),
                 pending_bytes: (r.pending_mib.max(0) as u64) << 20,
-            };
-            (c, r.address.unwrap_or_default())
+            }
         })
         .collect())
 }
@@ -798,9 +805,8 @@ pub fn new_sandbox_id() -> String {
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Connection {
-    /// The sandbox server's daemon, on your tailnet. HTTPS on the server's
-    /// tailnet name when it joined over HTTPS (every server added from
-    /// 0.51.1).
+    /// The sandbox server's daemon, on your tailnet: HTTPS on the server's
+    /// tailnet name.
     pub url: String,
     pub sandbox_id: String,
     /// `Authorization: Bearer <token>` for exec, terminals, files and ports.
@@ -810,47 +816,37 @@ pub struct Connection {
     pub expires_at: u64,
     /// Where its ports' web pages open over HTTPS on your tailnet, like the
     /// desktop's screen: `<webUrl>/v1/sandboxes/{id}/web/{port}/`, with the
-    /// token once as `?pyo_token=`. Missing until Tailscale is set up and
-    /// that name is ready.
+    /// token once as `?pyo_token=`. The same as `url`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_url: Option<String>,
 }
 
-async fn connection(
-    s: &AppState,
-    sandbox: &str,
-    team: &str,
-    server: &str,
-    address: &str,
-) -> ApiResult<Connection> {
+async fn connection(s: &AppState, sandbox: &str, team: &str, server: &str) -> ApiResult<Connection> {
+    // Browsers and SDKs reach the daemon on its server's own tailnet name,
+    // pages included. A server that joined the old way has none yet.
+    let row: Option<(bool, Option<String>)> =
+        sqlx::query_as("SELECT outbound, tailnet_name FROM pyo.sandbox_servers WHERE id = $1")
+            .bind(server)
+            .fetch_optional(&s.db)
+            .await?;
+    let url = match row {
+        Some((true, Some(name))) => outbound::tailnet_url(&name),
+        Some((false, _)) => return Err(ApiError::conflict(NEEDS_UPDATE)),
+        Some((true, None)) => {
+            return Err(ApiError::conflict(
+                "The sandbox's server hasn't joined yet.",
+            ));
+        }
+        None => return Err(ApiError::conflict("The sandbox's server was removed.")),
+    };
     let key = keys::signing_key(&s.db, &s.sealer).await?;
     let t = keys::client_token(&key, sandbox, team, server);
-    // A server that joined over HTTPS (Pyo Cloud's) answers browsers and
-    // SDKs on its own tailnet name, pages included.
-    let name: Option<String> = sqlx::query_scalar(
-        "SELECT tailnet_name FROM pyo.sandbox_servers WHERE id = $1 AND outbound",
-    )
-    .bind(server)
-    .fetch_optional(&s.db)
-    .await?
-    .flatten();
-    if let Some(url) = name.as_deref().map(outbound::tailnet_url) {
-        return Ok(Connection {
-            url: url.clone(),
-            sandbox_id: sandbox.to_owned(),
-            token: t.token,
-            expires_at: t.expires_at,
-            web_url: Some(url),
-        });
-    }
     Ok(Connection {
-        url: daemon::base_url(address),
+        url: url.clone(),
         sandbox_id: sandbox.to_owned(),
         token: t.token,
         expires_at: t.expires_at,
-        web_url: crate::web::addresses()
-            .sandboxes
-            .map(|h| format!("https://{h}")),
+        web_url: Some(url),
     })
 }
 
@@ -932,8 +928,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     let lim = limits::load(&mut tx, &team_id).await?;
     let used = limits::in_use(&mut tx, &team_id).await?;
     limits::check(&lim, &used, &spec).map_err(ApiError::forbidden)?;
-    let servers = candidates(&mut tx, &team_id).await?;
-    let list: Vec<scheduler::Candidate> = servers.iter().map(|(c, _)| c.clone()).collect();
+    let list = candidates(&mut tx, &team_id).await?;
     let on_demand = base::on_demand(&template.id);
     let placed = match req
         .server
@@ -962,11 +957,6 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     spec.template = placed.template.clone();
     let build = placed.build;
     let (server_id, server_label) = (placed.server.id.clone(), placed.server.name.clone());
-    let address = servers
-        .iter()
-        .find(|(c, _)| c.id == server_id)
-        .map(|(_, a)| a.clone())
-        .unwrap_or_default();
     // Kept without env values: they may be secrets.
     let mut kept = spec.clone();
     for v in kept.env.values_mut() {
@@ -997,7 +987,6 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
             &s.db,
             &key,
             &server_id,
-            &address,
             &template.id,
             &spec.template,
         )
@@ -1021,12 +1010,8 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
             )));
         }
     }
-    let token = keys::create_token(&key, &spec.id, &team_id, &server_id);
-    let d = daemon::Daemon::new(&server_id, &address);
-    let st = match d
-        .sandbox(&token, &DaemonCommand::Create { spec: spec.clone() })
-        .await
-    {
+    let d = daemon::Daemon::new(&server_id);
+    let st = match d.sandbox(&DaemonCommand::Create { spec: spec.clone() }).await {
         Ok(st) => st,
         Err(e) => {
             let mut c = s.db.acquire().await?;
@@ -1036,7 +1021,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     };
     let mut c = s.db.acquire().await?;
     save_status(&mut c, &st).await?;
-    let conn = connection(s, &spec.id, &team_id, &server_id, &address).await?;
+    let conn = connection(s, &spec.id, &team_id, &server_id).await?;
     let teams = [team_id.clone()];
     let view = sandbox_views(&s.db, &teams, Some(&spec.id), false)
         .await?
@@ -1047,33 +1032,35 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
 
 // ── One sandbox ────────────────────────────────────────────────────────────
 
-/// A sandbox's team, server and address, after checking `need`.
+/// A sandbox's team and server, after checking `need`.
 pub struct Found {
     pub id: String,
     pub team_id: String,
     pub server_id: Option<String>,
-    pub address: Option<String>,
+    /// Whether its server joined over the outbound channel. False for one
+    /// that joined the old way ([`NEEDS_UPDATE`]), or once it's removed.
+    pub outbound: bool,
     pub state: String,
 }
 
 pub async fn find(s: &AppState, user: &User, id: &str, need: Need) -> ApiResult<Found> {
     // Within the user's teams only (rls.rs): another team's sandbox isn't there.
     let mut tx = crate::rls::begin(&s.db, user).await?;
-    let row: Option<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
-        "SELECT x.team_id, x.server_id, sv.address, x.state FROM pyo.sandboxes x
+    let row: Option<(String, Option<String>, bool, String)> = sqlx::query_as(
+        "SELECT x.team_id, sv.id, coalesce(sv.outbound, false), x.state FROM pyo.sandboxes x
            LEFT JOIN pyo.sandbox_servers sv ON sv.id = x.server_id WHERE x.id = $1",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (team_id, server_id, address, state) = row.ok_or_else(|| ApiError::not_found("Sandbox"))?;
+    let (team_id, server_id, outbound, state) = row.ok_or_else(|| ApiError::not_found("Sandbox"))?;
     require(&mut tx, user, &team_id, need).await?;
     tx.commit().await?;
     Ok(Found {
         id: id.to_owned(),
         team_id,
         server_id,
-        address,
+        outbound,
         state,
     })
 }
@@ -1083,35 +1070,31 @@ impl Found {
         matches!(self.state.as_str(), "stopped" | "failed")
     }
 
-    /// The server's daemon and an admin token for it, while the sandbox
-    /// lives.
-    pub async fn daemon(&self, s: &AppState) -> ApiResult<(daemon::Daemon, String, String)> {
+    /// Why Pyo can't reach the sandbox's server now, if it can't: it
+    /// ended, its server was removed, or its server needs an update.
+    fn unreachable(&self) -> Option<ApiError> {
         if self.is_final() {
-            return Err(ApiError::conflict(format!(
+            return Some(ApiError::conflict(format!(
                 "The sandbox {} has ended.",
                 self.id
             )));
         }
-        let (Some(server), Some(address)) = (&self.server_id, &self.address) else {
-            return Err(ApiError::conflict("The sandbox's server was removed."));
-        };
-        let key = keys::signing_key(&s.db, &s.sealer).await?;
-        Ok((
-            daemon::Daemon::new(server, address),
-            keys::admin_token(&key, server),
-            server.clone(),
-        ))
+        if self.server_id.is_none() {
+            return Some(ApiError::conflict("The sandbox's server was removed."));
+        }
+        if !self.outbound {
+            return Some(ApiError::conflict(NEEDS_UPDATE));
+        }
+        None
     }
 
-    /// A client token for this sandbox, for Pyo's own calls on a user's
-    /// behalf (the assistants' tools).
-    pub async fn client(&self, s: &AppState) -> ApiResult<(daemon::Daemon, String)> {
-        let (d, _, server) = self.daemon(s).await?;
-        let key = keys::signing_key(&s.db, &s.sealer).await?;
-        Ok((
-            d,
-            keys::client_token(&key, &self.id, &self.team_id, &server).token,
-        ))
+    /// The server's daemon, and the server's id, while the sandbox lives.
+    pub fn daemon(&self) -> ApiResult<(daemon::Daemon, String)> {
+        if let Some(e) = self.unreachable() {
+            return Err(e);
+        }
+        let server = self.server_id.clone().unwrap_or_default();
+        Ok((daemon::Daemon::new(&server), server))
     }
 }
 
@@ -1123,14 +1106,15 @@ pub async fn get(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
     let mut c = s.db.acquire().await?;
     let may_use = require(&mut c, user, &f.team_id, Need::Use).await;
     drop(c);
-    let (conn, note) = match (may_use, &f.server_id, &f.address) {
-        (Err(e), _, _) => (None, e.message),
-        (Ok(()), _, _) if f.is_final() => (None, "The sandbox has ended.".into()),
-        (Ok(()), Some(server), Some(address)) => (
-            Some(connection(s, id, &f.team_id, server, address).await?),
+    let (conn, note) = match (may_use, &f.server_id) {
+        (Err(e), _) => (None, e.message),
+        (Ok(()), _) if f.is_final() => (None, "The sandbox has ended.".into()),
+        (Ok(()), Some(server)) if f.outbound => (
+            Some(connection(s, id, &f.team_id, server).await?),
             String::new(),
         ),
-        (Ok(()), _, _) => (None, "The sandbox's server was removed.".into()),
+        (Ok(()), Some(_)) => (None, NEEDS_UPDATE.into()),
+        (Ok(()), None) => (None, "The sandbox's server was removed.".into()),
     };
     v["connection"] = json!(conn);
     if conn.is_none() {
@@ -1159,19 +1143,16 @@ pub async fn delete(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
     }
     let mut c = s.db.acquire().await?;
     // Its server was removed: nothing is left to end.
-    if f.server_id.is_none() || f.address.is_none() {
+    if f.server_id.is_none() {
         end(&mut c, id, "stopped", None).await?;
         return view(s, user, &f).await;
     }
-    let (d, token, _) = f.daemon(s).await?;
+    let (d, _) = f.daemon()?;
     sqlx::query("UPDATE pyo.sandboxes SET state = 'stopping' WHERE id = $1 AND state NOT IN ('stopped', 'failed')")
         .bind(id)
         .execute(&mut *c)
         .await?;
-    match d
-        .command(&token, &DaemonCommand::Delete { id: id.to_owned() })
-        .await
-    {
+    match d.command(&DaemonCommand::Delete { id: id.to_owned() }).await {
         Ok(_) => end(&mut c, id, "stopped", None).await?,
         Err(e) if e.code == ErrorCode::NotFound => end(&mut c, id, "stopped", None).await?,
         Err(e) => {
@@ -1225,11 +1206,8 @@ async fn lifecycle(
     cmd: impl FnOnce(String) -> DaemonCommand,
 ) -> ApiResult<Value> {
     let f = find(s, user, id, Need::Use).await?;
-    let (d, token, _) = f.daemon(s).await?;
-    let st = d
-        .sandbox(&token, &cmd(id.to_owned()))
-        .await
-        .map_err(daemon_error)?;
+    let (d, _) = f.daemon()?;
+    let st = d.sandbox(&cmd(id.to_owned())).await.map_err(daemon_error)?;
     let mut c = s.db.acquire().await?;
     save_status(&mut c, &st).await?;
     view(s, user, &f).await
@@ -1249,7 +1227,7 @@ pub async fn open_port(
         return Err(ApiError::bad_request("The port must be 1 to 65535."));
     }
     let f = find(s, user, id, Need::Use).await?;
-    let (d, token, server) = f.daemon(s).await?;
+    let (d, server) = f.daemon()?;
     let capability: Option<Value> =
         sqlx::query_scalar("SELECT capability FROM pyo.sandbox_servers WHERE id = $1")
             .bind(&server)
@@ -1266,7 +1244,6 @@ pub async fn open_port(
     };
     let st = d
         .sandbox(
-            &token,
             &DaemonCommand::OpenPort {
                 id: id.to_owned(),
                 port,
@@ -1287,10 +1264,9 @@ pub async fn close_port(s: &AppState, user: &User, id: &str, port: u16) -> ApiRe
         return Err(ApiError::bad_request("The port must be 1 to 65535."));
     }
     let f = find(s, user, id, Need::Use).await?;
-    let (d, token, _) = f.daemon(s).await?;
+    let (d, _) = f.daemon()?;
     let st = d
         .sandbox(
-            &token,
             &DaemonCommand::ClosePort {
                 id: id.to_owned(),
                 port,
@@ -1307,15 +1283,8 @@ pub async fn close_port(s: &AppState, user: &User, id: &str, port: u16) -> ApiRe
 /// out.
 pub async fn token(s: &AppState, user: &User, id: &str) -> ApiResult<Connection> {
     let f = find(s, user, id, Need::Use).await?;
-    let (_, _, server) = f.daemon(s).await?;
-    connection(
-        s,
-        id,
-        &f.team_id,
-        &server,
-        f.address.as_deref().unwrap_or_default(),
-    )
-    .await
+    let (_, server) = f.daemon()?;
+    connection(s, id, &f.team_id, &server).await
 }
 
 // ── Servers and templates ──────────────────────────────────────────────────
@@ -1430,20 +1399,18 @@ pub async fn forget_server(
     Ok(live.len())
 }
 
-/// Removes a sandbox server: its sandboxes are deleted where it still
-/// answers, and Pyo forgets it. The daemon stays installed on the server
-/// until `sandbox.sh --uninstall` runs there. One Pyo made at a cloud
+/// Removes a sandbox server: Pyo forgets it and its sandboxes. The daemon
+/// stays installed on the server until `sandbox.sh --uninstall` runs
+/// there. One Pyo made at a cloud
 /// provider is deleted there too, which takes `confirm` (409 with the
 /// monthly cost that stops until then).
 pub async fn remove_server(s: &AppState, user: &User, id: &str, confirm: bool) -> ApiResult<Value> {
-    let row: Option<(Option<String>, Option<String>, String, bool)> = sqlx::query_as(
-        "SELECT team_id, address, name, outbound FROM pyo.sandbox_servers WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&s.db)
-    .await?;
-    let (team_id, address, name, outbound) =
-        row.ok_or_else(|| ApiError::not_found("Sandbox server"))?;
+    let row: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT team_id, name FROM pyo.sandbox_servers WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&s.db)
+            .await?;
+    let (team_id, name) = row.ok_or_else(|| ApiError::not_found("Sandbox server"))?;
     let mut tx = s.db.begin().await?;
     match &team_id {
         Some(t) => require(&mut tx, user, t, Need::Manage).await?,
@@ -1464,29 +1431,9 @@ pub async fn remove_server(s: &AppState, user: &User, id: &str, confirm: bool) -
             crate::ops::money(currency, *monthly)
         )));
     }
-    let live: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM pyo.sandboxes WHERE server_id = $1 AND state NOT IN ('stopped', 'failed')",
-    )
-    .bind(id)
-    .fetch_all(&mut *tx)
-    .await?;
-    // An outbound server isn't called: its keys and commands go with its
-    // row, and its daemon stops at its next request.
-    if let Some(address) = address.as_ref().filter(|_| !outbound)
-        && !live.is_empty()
-        && let Ok(key) = keys::signing_key(&s.db, &s.sealer).await
-    {
-        let d = daemon::Daemon::new(id, address);
-        let token = keys::admin_token(&key, id);
-        for x in &live {
-            if let Err(e) = d
-                .command(&token, &DaemonCommand::Delete { id: x.clone() })
-                .await
-            {
-                tracing::warn!(sandbox = %x, error = %e, "removing a sandbox server: couldn't delete a sandbox");
-            }
-        }
-    }
+    // Its daemon isn't told: its keys and commands go with its row, and it
+    // stops at its next request. Its sandboxes end at their lifetime, or
+    // with `sandbox.sh --uninstall` there.
     let stopped = forget_server(&mut tx, id, "Its sandbox server was removed.").await?;
     // Off the tailnet and deleted at the provider by cloud/mod.rs `tick`.
     if let Some((cloud_id, _, _)) = &cloud {
@@ -2122,8 +2069,8 @@ mod tests {
             .unwrap();
 
         let mut tx = db.acquire().await.unwrap();
-        let servers = |v: Vec<(scheduler::Candidate, String)>| {
-            let mut ids: Vec<String> = v.into_iter().map(|(c, _)| c.id).collect();
+        let servers = |v: Vec<scheduler::Candidate>| {
+            let mut ids: Vec<String> = v.into_iter().map(|c| c.id).collect();
             ids.retain(|i| i.ends_with(&run));
             ids.sort();
             ids

@@ -24,8 +24,8 @@ use futures::{SinkExt, StreamExt};
 use pyo_proto::sandbox::token::{ANY_SANDBOX, Claims, SigningKey};
 use pyo_proto::sandbox::wire::{Cmd, ErrorKind, Frame, Kind, PtySpec, Request, Response, Scope};
 use pyo_proto::sandbox::{
-    DaemonCommand, DaemonResult, ExecResult, Kvm, NetworkMode, Runtime, SandboxSpec, SandboxStatus,
-    sandbox_id_from,
+    DaemonCommand, DaemonError, DaemonResult, ErrorCode, ExecResult, Kvm, NetworkMode, Runtime,
+    SandboxSpec, SandboxStatus, sandbox_id_from,
 };
 use pyo_sandbox::api::{self, AppState};
 use pyo_sandbox::config::Config;
@@ -128,6 +128,12 @@ async fn json<T: serde::de::DeserializeOwned>(
         String::from_utf8_lossy(&b)
     );
     serde_json::from_slice(&b).unwrap()
+}
+
+/// One of Pyo's calls, as its channel runs it (outbound/): Pyo never
+/// calls the API with a token of its own.
+async fn pyo(state: &AppState, cmd: DaemonCommand) -> Result<DaemonResult, DaemonError> {
+    api::run(state, api::Caller::Pyo, cmd).await.map_err(|e| e.0)
 }
 
 fn sandbox_of(r: DaemonResult) -> SandboxStatus {
@@ -567,7 +573,6 @@ async fn edge_hot_reload(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &st
     let bound = edge.clone().start().await.unwrap();
     let (https_port, http_port) = (bound.https.unwrap().port(), bound.http.unwrap().port());
     let app = api::router(state.clone());
-    let admin = keys.admin();
     let _: DaemonResult = json(
         &app,
         "POST",
@@ -607,38 +612,36 @@ async fn edge_hot_reload(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &st
     assert_eq!(cap.edge_cert, None);
 
     let set = |cert: String, key: String| {
-        let app = app.clone();
-        let admin = admin.clone();
+        let state = state.clone();
         async move {
-            let (s, b) = call(
-                &app,
-                "POST",
-                "/v1/commands",
-                Some(&admin),
-                Body::from(
-                    serde_json::to_string(&DaemonCommand::SetEdgeCert {
-                        cert,
-                        key: SecretPem(key),
-                    })
-                    .unwrap(),
-                ),
+            match pyo(
+                &state,
+                DaemonCommand::SetEdgeCert {
+                    cert,
+                    key: SecretPem(key),
+                },
             )
-            .await;
-            (s, serde_json::from_slice::<serde_json::Value>(&b).unwrap())
+            .await
+            {
+                Ok(r) => (StatusCode::OK, serde_json::to_value(r).unwrap()),
+                Err(e) => (
+                    StatusCode::from_u16(e.code.http_status()).unwrap(),
+                    serde_json::to_value(e).unwrap(),
+                ),
+            }
         }
     };
-    // Only an admin token may set it, and a key that isn't the
-    // certificate's is refused.
+    // Only Pyo sets it, over its channel: the API has no route for it,
+    // and a key that isn't the certificate's is refused.
     let (s, _) = {
         let body = serde_json::to_string(&DaemonCommand::SetEdgeCert {
             cert: c1.clone(),
             key: SecretPem(k1.clone()),
         })
         .unwrap();
-        let ports = keys.token(id, TEAM, &[Scope::Ports]);
-        call(&app, "POST", "/v1/commands", Some(&ports), Body::from(body)).await
+        call(&app, "POST", "/v1/commands", Some(&keys.admin()), Body::from(body)).await
     };
-    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, v) = set(c1.clone(), k2.clone()).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     assert!(!cert_path.exists(), "nothing written for a bad pair");
@@ -935,18 +938,8 @@ async fn boots_real_microvms() {
     // ── Cold create through the API ──
     let a = spec(1);
     let ida = a.id.clone();
-    let create_a = keys.token(&ida, TEAM, &[Scope::Create]);
     let t = Instant::now();
-    let st = sandbox_of(
-        json(
-            &app,
-            "POST",
-            "/v1/sandboxes",
-            &create_a,
-            serde_json::to_value(&a).unwrap(),
-        )
-        .await,
-    );
+    let st = sandbox_of(pyo(&state, DaemonCommand::Create { spec: a.clone() }).await.unwrap());
     note(
         "cold_create_api_ms",
         (t.elapsed().as_millis() as u64).into(),
@@ -963,36 +956,47 @@ async fn boots_real_microvms() {
     note("cold_guest_uptime_at_first_exec", up.stdout.trim().into());
     assert!(!st.from_snapshot);
 
-    // A create token for one team can't create in another.
-    let mut other = spec(2);
-    other.team = "someone-else".into();
-    let (s, _) = call(
+    // Pyo's own calls never come over the API: no route takes them, and
+    // a token Pyo signed for them before 0.52.0 opens nothing.
+    let other = spec(2);
+    for (method, uri) in [
+        ("POST", "/v1/sandboxes".to_owned()),
+        ("GET", "/v1/sandboxes".to_owned()),
+        ("GET", "/v1/report".to_owned()),
+        ("POST", "/v1/commands".to_owned()),
+        ("POST", format!("/v1/sandboxes/{ida}/pause")),
+        ("POST", format!("/v1/sandboxes/{ida}/resume")),
+        ("POST", format!("/v1/sandboxes/{ida}/ttl")),
+    ] {
+        let (s, _) = call(
+            &app,
+            method,
+            &uri,
+            Some(&keys.token(&other.id, TEAM, &[Scope::Create, Scope::Lifecycle])),
+            Body::from(serde_json::to_string(&other).unwrap()),
+        )
+        .await;
+        assert!(
+            s == StatusCode::NOT_FOUND || s == StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {uri}: {s}"
+        );
+    }
+    let (s, b) = call(
         &app,
         "POST",
-        "/v1/sandboxes",
-        Some(&keys.token(&other.id, TEAM, &[Scope::Create])),
-        Body::from(serde_json::to_string(&other).unwrap()),
+        &format!("/v1/sandboxes/{ida}/exec"),
+        Some(&keys.admin()),
+        Body::from(r#"{"cmd":"true"}"#),
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(s, StatusCode::FORBIDDEN, "{}", String::from_utf8_lossy(&b));
+    assert!(String::from_utf8_lossy(&b).contains(api::ADMIN_REFUSED));
     // Dev mode as a normal user has no networking, and says so. The
     // network e2e (`network_e2e.rs`) runs as root.
     let mut net = spec(3);
     net.network = NetworkMode::Internet;
-    let (s, b) = call(
-        &app,
-        "POST",
-        "/v1/sandboxes",
-        Some(&keys.token(&net.id, TEAM, &[Scope::Create])),
-        Body::from(serde_json::to_string(&net).unwrap()),
-    )
-    .await;
-    assert_eq!(
-        s,
-        StatusCode::NOT_IMPLEMENTED,
-        "{}",
-        String::from_utf8_lossy(&b)
-    );
+    let e = pyo(&state, DaemonCommand::Create { spec: net }).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported, "{e:?}");
 
     // ── Exec ──
     let exec_a = keys.token(&ida, TEAM, &[Scope::Exec]);
@@ -1246,22 +1250,18 @@ async fn boots_real_microvms() {
     note("edge_hot_reload", "ok".into());
 
     // ── Template snapshot, then restores ──
-    let admin = keys.admin();
-    let snap: DaemonResult = json(
-        &app,
-        "POST",
-        "/v1/commands",
-        &admin,
-        serde_json::to_value(DaemonCommand::SnapshotTemplate {
+    let snap = pyo(
+        &state,
+        DaemonCommand::SnapshotTemplate {
             template: "busybox".into(),
             cpus: 1,
             memory_mib: 256,
             disk_mib: 256,
             network: None,
-        })
-        .unwrap(),
+        },
     )
-    .await;
+    .await
+    .unwrap();
     let DaemonResult::TemplateSnapshot { key, took_ms, .. } = snap else {
         panic!("{snap:?}")
     };
@@ -1285,22 +1285,9 @@ async fn boots_real_microvms() {
     let mut walls = Vec::new();
     for n in 10..20u8 {
         let s = spec(n);
-        let tok = keys.token(
-            &s.id,
-            TEAM,
-            &[Scope::Create, Scope::Exec, Scope::Files, Scope::Lifecycle],
-        );
+        let tok = keys.token(&s.id, TEAM, &[Scope::Exec, Scope::Files]);
         let t = Instant::now();
-        let st = sandbox_of(
-            json(
-                &app,
-                "POST",
-                "/v1/sandboxes",
-                &tok,
-                serde_json::to_value(&s).unwrap(),
-            )
-            .await,
-        );
+        let st = sandbox_of(pyo(&state, DaemonCommand::Create { spec: s.clone() }).await.unwrap());
         let r: ExecResult = json(
             &app,
             "POST",
@@ -1384,16 +1371,7 @@ async fn boots_real_microvms() {
     )
     .await;
     let t = Instant::now();
-    let st = sandbox_of(
-        json(
-            &app,
-            "POST",
-            &format!("/v1/sandboxes/{id3}/pause"),
-            &tok3,
-            serde_json::Value::Null,
-        )
-        .await,
-    );
+    let st = sandbox_of(pyo(&state, DaemonCommand::Pause { id: id3.clone() }).await.unwrap());
     note("pause_ms", (t.elapsed().as_millis() as u64).into());
     assert_eq!(st.state, pyo_proto::sandbox::SandboxState::Paused);
     let pmem = std::fs::metadata(layout.vm_dir(&id3).join("pause.mem")).unwrap();
@@ -1411,16 +1389,7 @@ async fn boots_real_microvms() {
     .await;
     assert_eq!(s, StatusCode::CONFLICT);
     let t = Instant::now();
-    let st = sandbox_of(
-        json(
-            &app,
-            "POST",
-            &format!("/v1/sandboxes/{id3}/resume"),
-            &tok3,
-            serde_json::Value::Null,
-        )
-        .await,
-    );
+    let st = sandbox_of(pyo(&state, DaemonCommand::Resume { id: id3.clone() }).await.unwrap());
     note("resume_api_ms", (t.elapsed().as_millis() as u64).into());
     note("resume_start_ms", st.start_ms.into());
     let r: ExecResult = json(
@@ -1450,16 +1419,17 @@ async fn boots_real_microvms() {
 
     // ── Lifetimes ──
     mgr.spawn_sweeper();
-    let (id4, tok4) = restored[3].clone();
+    let (id4, _) = restored[3].clone();
     let _ = sandbox_of(
-        json(
-            &app,
-            "POST",
-            &format!("/v1/sandboxes/{id4}/ttl"),
-            &tok4,
-            serde_json::json!({"ttlSecs": 1}),
+        pyo(
+            &state,
+            DaemonCommand::SetTtl {
+                id: id4.clone(),
+                ttl_secs: Some(1),
+            },
         )
-        .await,
+        .await
+        .unwrap(),
     );
     let t = Instant::now();
     while mgr.find(&id4).is_ok() {
@@ -1480,15 +1450,10 @@ async fn boots_real_microvms() {
         Body::empty(),
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
-    let _: DaemonResult = json(
-        &app,
-        "DELETE",
-        &format!("/v1/sandboxes/{ida}"),
-        &keys.token(&ida, TEAM, &[Scope::Lifecycle]),
-        serde_json::Value::Null,
-    )
-    .await;
+    assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED, "only Pyo deletes, over its channel");
+    pyo(&state, DaemonCommand::Delete { id: ida.clone() })
+        .await
+        .unwrap();
     mgr.delete_all().await;
     assert_eq!(std::fs::read_dir(layout.sandboxes()).unwrap().count(), 0);
     tokio::time::sleep(Duration::from_millis(100)).await;

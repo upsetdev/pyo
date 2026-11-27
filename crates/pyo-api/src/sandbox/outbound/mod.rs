@@ -23,17 +23,18 @@
 //! docs/cloud-sandbox-servers.md "Self-hosted"): its own signer
 //! ([`signer::Local`]), its tailnet address or public address for the
 //! daemon ([`self_hosted_reach`]), and the installation's servers (no
-//! team) too. Servers that joined at its door before keep that path until
-//! **Update** ([`reset_access`]) moves them over.
+//! team) too. Servers that joined at its door before take no commands
+//! from 0.52.0 (`super::NEEDS_UPDATE`) until **Update** ([`reset_access`])
+//! moves them over.
 
 pub mod channel;
 pub mod signer;
 #[cfg(test)]
-mod e2e;
+pub(crate) mod e2e;
 #[cfg(test)]
 mod self_hosted_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::time::Duration;
 
@@ -287,8 +288,9 @@ pub async fn create_join_code(
 /// their records.
 ///
 /// On a self-hosted Pyo it's **Update** too, for a server that joined at
-/// the door before: a command that moves it to this channel. Nothing stops
-/// until it runs there: Pyo keeps calling the server until its join.
+/// the door before: a command that moves it to this channel. It takes no
+/// commands until it runs there (`super::NEEDS_UPDATE`). Its sandboxes
+/// keep running.
 pub async fn reset_access(
     s: &AppState,
     signer: &dyn CommandSigner,
@@ -345,8 +347,8 @@ pub async fn reset_access(
             .execute(&mut *tx)
             .await?;
     }
-    // A server Pyo still calls keeps its route until it joins here: its
-    // cluster stays, and one Pyo called straight takes the key's.
+    // A server that joined at the door keeps its cluster until it joins
+    // here. One without takes the key's.
     sqlx::query(
         "UPDATE pyo.sandbox_servers SET via_cluster = CASE WHEN outbound THEN $2 ELSE coalesce(via_cluster, $2) END,
                 pyo_url = $3 WHERE id = $1",
@@ -900,7 +902,7 @@ pub async fn join(
     let address = ask.address.trim();
     let tailnet_name = ask.tailnet_name.trim().trim_end_matches('.').to_ascii_lowercase();
     // A server that joined at the door before works over this channel
-    // from now on: Pyo stops calling it.
+    // from now on, and takes commands again.
     sqlx::query(
         "UPDATE pyo.sandbox_servers SET address = $2, tailnet_name = $3, capability = coalesce($4, capability),
                 outbound = true, joined_at = now(), error = NULL, updated_at = now() WHERE id = $1",

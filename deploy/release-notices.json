@@ -1,10 +1,8 @@
 {
-  "version": "0.51.0",
+  "version": "0.52.0",
   "minFrom": null,
-  "manualOnly": false,
+  "manualOnly": true,
   "beforeYouUpdate": [
-    "After updating, run the connect command shown in each cluster's settings.",
-    "Skip the cluster Pyo runs on. Its server runs the command by itself.",
-    "Your databases restart once when their cluster runs that command."
+    "Self-hosted sandbox servers stop taking commands after this update until an admin presses Update on each one and runs the command it shows on that server. Their sandboxes keep running."
   ]
 }

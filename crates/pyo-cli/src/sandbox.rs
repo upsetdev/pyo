@@ -2,7 +2,7 @@
 //! list, pause and delete them through Pyo's API, one command per endpoint.
 //! `exec`, `shell` and `cp` then talk to the sandbox's server directly with
 //! the client token Pyo signs (`createSandboxToken`), as the SDK does. The
-//! server answers on its tailnet address, so those need the tailnet.
+//! server answers HTTPS on its tailnet name, so those need the tailnet.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -659,10 +659,10 @@ async fn ports(api: &Api, cmd: PortsCommand) -> Result<()> {
 
 // ── Servers and templates ──────────────────────────────────────────────────
 
-/// Whether this Pyo adds sandbox servers at its tailnet door
-/// (`addSandboxServer`): a self-hosted Pyo answers the Pyo Cloud way
-/// (`createSandboxJoinCode`) so, or doesn't have it.
-fn at_the_door(e: &anyhow::Error) -> bool {
+/// Whether this Pyo adds sandbox servers with `addSandboxServer` (a
+/// self-hosted Pyo): it answers the Pyo Cloud way (`createSandboxJoinCode`)
+/// so, or doesn't have it. The server joins over HTTPS either way.
+fn self_hosted_add(e: &anyhow::Error) -> bool {
     e.downcast_ref::<crate::api::Refused>().is_some_and(|r| {
         r.status == 404 || r.status == 405 || (r.status == 409 && r.message.contains("addSandboxServer"))
     })
@@ -681,7 +681,7 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
             // and it joins over HTTPS there too.
             let (r, hint) = match api.post("/api/v1/sandbox-servers/join-codes", &body).await {
                 Ok(r) => (r, "Run this on the server."),
-                Err(e) if at_the_door(&e) => (
+                Err(e) if self_hosted_add(&e) => (
                     api.post("/api/v1/sandbox-servers", &body).await?,
                     "Run this on the server as root.",
                 ),
@@ -714,9 +714,10 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
                         Some(cs) if cs != "ready" => format!("{cs} (Hetzner)"),
                         _ => x["state"].as_str().unwrap_or("").to_owned(),
                     };
-                    // Joined at the door before: Update in the dashboard.
+                    // Joined before 0.52.0: it takes no commands until
+                    // Update in the dashboard.
                     if x["needsUpdate"] == json!(true) {
-                        state.push_str(", needs update");
+                        state = "needs update".into();
                     }
                     [
                         x["name"].as_str().unwrap_or("").to_owned(),
@@ -735,6 +736,9 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
                 })
                 .collect();
             table(&["NAME", "STATE", "RUNTIME", "SIZE", "SANDBOXES"], &rows);
+            if let Some(note) = update_note(list) {
+                println!("\n{note}");
+            }
             Ok(())
         }
         ServersCommand::Rm { server, yes } => {
@@ -1109,24 +1113,55 @@ async fn shell(api: &Api, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Under the servers list: what to do about servers that joined before
+/// 0.52.0, which take no commands until they're updated.
+fn update_note(servers: &[Value]) -> Option<String> {
+    let old: Vec<&str> = servers
+        .iter()
+        .filter(|x| x["needsUpdate"] == json!(true))
+        .filter_map(|x| x["name"].as_str())
+        .collect();
+    match old.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "{one} needs an update. Press Update on it in the dashboard to reconnect it."
+        )),
+        many => Some(format!(
+            "{} need an update. Press Update on each in the dashboard to reconnect it.",
+            many.join(", ")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn self_hosted_adds_servers_at_its_door() {
+    fn servers_that_need_an_update_say_what_to_do() {
+        assert_eq!(update_note(&[json!({ "name": "a", "needsUpdate": false })]), None);
+        assert_eq!(
+            update_note(&[json!({ "name": "sbx-1", "needsUpdate": true })]).as_deref(),
+            Some("sbx-1 needs an update. Press Update on it in the dashboard to reconnect it.")
+        );
+        let two = [json!({ "name": "a", "needsUpdate": true }), json!({ "name": "b", "needsUpdate": true })];
+        assert!(update_note(&two).unwrap().starts_with("a, b need an update."));
+    }
+
+    #[test]
+    fn self_hosted_adds_servers_with_add_sandbox_server() {
         let refused = |status, message: &str| {
             anyhow::Error::new(crate::api::Refused {
                 status,
                 message: message.into(),
             })
         };
-        assert!(at_the_door(&refused(409, "This Pyo adds sandbox servers with addSandboxServer.")));
-        assert!(at_the_door(&refused(404, "Not found")));
-        assert!(at_the_door(&refused(405, "Method not allowed")));
-        assert!(!at_the_door(&refused(409, "A sandbox server has that name already.")));
-        assert!(!at_the_door(&refused(400, "Sandbox servers join your tailnet. Set up Tailscale on Integrations first.")));
-        assert!(!at_the_door(&anyhow::anyhow!("Couldn't reach Pyo.")));
+        assert!(self_hosted_add(&refused(409, "This Pyo adds sandbox servers with addSandboxServer.")));
+        assert!(self_hosted_add(&refused(404, "Not found")));
+        assert!(self_hosted_add(&refused(405, "Method not allowed")));
+        assert!(!self_hosted_add(&refused(409, "A sandbox server has that name already.")));
+        assert!(!self_hosted_add(&refused(400, "Sandbox servers join your tailnet. Set up Tailscale on Integrations first.")));
+        assert!(!self_hosted_add(&anyhow::anyhow!("Couldn't reach Pyo.")));
     }
 
     #[test]

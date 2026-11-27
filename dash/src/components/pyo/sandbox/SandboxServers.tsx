@@ -11,11 +11,12 @@ import {
 import { useEffect, useState } from "react";
 import { CloudStateBadge, money } from "~/components/pyo/Hetzner";
 import { Button, ButtonLink } from "~/components/ui/Button";
+import { Dot } from "~/components/ui/Badge";
 import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import { Menu } from "~/components/ui/Menu";
-import { Meter } from "~/components/ui/Panel";
+import { Callout, Meter } from "~/components/ui/Panel";
 import { cloudflareZoneFor, refresh, roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
-import { sandboxApi, type SandboxServer } from "~/lib/pyo/sandbox";
+import { NEEDS_UPDATE, sandboxApi, type SandboxServer } from "~/lib/pyo/sandbox";
 import { toast } from "~/lib/pyo/toast";
 import {
   JoinCommandView,
@@ -135,7 +136,9 @@ export function SandboxServers() {
                 <div className="flex items-center gap-2.5">
                   <span className="truncate text-[13.5px] font-medium">{x.name}</span>
                   <RuntimeBadge server={x} />
-                  {x.cloud && x.cloud.state !== "ready" ? (
+                  {x.needsUpdate ? (
+                    <NeedsUpdateState />
+                  ) : x.cloud && x.cloud.state !== "ready" ? (
                     <CloudStateBadge state={x.cloud.state} />
                   ) : (
                     <ServerState server={x} />
@@ -159,7 +162,7 @@ export function SandboxServers() {
                 {x.edge ? <EdgeLine server={x} covered={!!zoneOf(x)} /> : null}
                 {x.needsUpdate ? (
                   <p className="flex items-center gap-2 text-[12px] text-muted-foreground">
-                    Run sandbox.sh again to update this server.
+                    {NEEDS_UPDATE}
                     {canRemove(x) ? (
                       <Button size="xs" variant="secondary" disabled={resetBusy} onClick={() => void reset(x)}>
                         Update
@@ -167,7 +170,7 @@ export function SandboxServers() {
                     ) : null}
                   </p>
                 ) : null}
-                {x.state !== "ready" && (x.error || x.summary) ? (
+                {!x.needsUpdate && x.state !== "ready" && (x.error || x.summary) ? (
                   <p className={`text-[12px] ${x.state === "refused" || x.state === "unreachable" ? "text-destructive" : "text-muted-foreground"}`}>
                     {x.error ?? x.summary}
                   </p>
@@ -264,6 +267,63 @@ export function SandboxServers() {
         }}
       />
     </section>
+  );
+}
+
+/** A server that joined before 0.52.0: it takes no commands until it's updated. */
+function NeedsUpdateState() {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+      <Dot tone="warning" className="h-2 w-2" />
+      Needs update
+    </span>
+  );
+}
+
+/**
+ * On a sandbox whose server joined before 0.52.0: the server takes no
+ * commands until it's updated, with Update for those who may run it.
+ */
+export function NeedsUpdateNotice({ server }: { server: SandboxServer }) {
+  const s = usePyo();
+  const role = roleIn(s);
+  const may = server.teamId ? role === "owner" || role === "admin" : !!s.user.isAdmin;
+  const [joining, setJoining] = useState<(Joining & { update: boolean }) | null>(null);
+  const [busy, setBusy] = useState(false);
+  const update = async () => {
+    setBusy(true);
+    try {
+      setJoining({ ...joiningOf(await sandboxApi.resetAccess(server.id), server.name), update: true });
+    } catch (e) {
+      toast({ tone: "error", title: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Callout tone="warning">
+        <span className="flex flex-wrap items-center gap-2">
+          {NEEDS_UPDATE}
+          {may ? (
+            <Button size="xs" variant="secondary" disabled={busy} onClick={() => void update()}>
+              Update
+            </Button>
+          ) : null}
+        </span>
+      </Callout>
+      {joining ? (
+        <RejoinDialog
+          joining={joining}
+          busy={busy}
+          onAgain={() => void update()}
+          onClose={() => {
+            setJoining(null);
+            void refresh().catch(() => undefined);
+          }}
+        />
+      ) : null}
+    </>
   );
 }
 

@@ -20,7 +20,7 @@ use pyo_proto::sandbox::token::SigningKey;
 use pyo_proto::sandbox::{DaemonCommand, DaemonError, DaemonResult, ErrorCode, TemplateReport};
 use sqlx::PgPool;
 
-use super::{daemon::Daemon, keys, templates};
+use super::{daemon::Daemon, templates};
 use crate::error::ApiError;
 
 /// How long a create waits for its server to make the template.
@@ -118,12 +118,11 @@ pub(crate) async fn get_ready<H: Host>(
     }
 }
 
-/// A sandbox server over the tailnet, for one template.
+/// A sandbox server, over its channel, for one template.
 struct Server<'a> {
     db: &'a PgPool,
     id: &'a str,
     daemon: Daemon,
-    token: String,
     prepare: DaemonCommand,
     name: String,
 }
@@ -150,7 +149,7 @@ impl Host for Server<'_> {
     }
 
     async fn prepare(&self) -> Result<TemplateReport, DaemonError> {
-        match self.daemon.command(&self.token, &self.prepare).await? {
+        match self.daemon.command(&self.prepare).await? {
             DaemonResult::Template { template } => {
                 self.save(Some(&template)).await;
                 Ok(template)
@@ -166,19 +165,18 @@ impl Host for Server<'_> {
         let cmd = DaemonCommand::DeleteTemplate {
             template: self.name.clone(),
         };
-        self.daemon.command(&self.token, &cmd).await?;
+        self.daemon.command(&cmd).await?;
         self.save(None).await;
         Ok(())
     }
 }
 
-/// Has server `server_id` (at `address`) make template `template_id`
+/// Has server `server_id` make template `template_id`
 /// under `name` (its current revision) and waits until it's ready there.
 pub async fn on_server(
     db: &PgPool,
     key: &SigningKey,
     server_id: &str,
-    address: &str,
     template_id: &str,
     name: &str,
 ) -> Result<(), NotReady> {
@@ -196,8 +194,7 @@ pub async fn on_server(
     let host = Server {
         db,
         id: server_id,
-        daemon: Daemon::new(server_id, address),
-        token: keys::admin_token(key, server_id),
+        daemon: Daemon::new(server_id),
         prepare,
         name: name.to_owned(),
     };

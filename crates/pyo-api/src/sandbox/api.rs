@@ -82,7 +82,7 @@ pub struct TeamQuery {
 #[utoipa::path(get, path = "/sandboxes", operation_id = "listSandboxes", tag = "Sandboxes",
     params(ListQuery),
     responses(
-        (status = 200, description = "`sandboxes`, newest first, each with `id`, `name`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `preparing` (true while it waits for its server to make its template), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon), `edgeUrl` (its server's edge proxy, or null), `ports` (each `port`, `public` and `url`), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt` (null when it runs until it's deleted), `pausedAt` and `endedAt`. Also `limits` (the team's, `maxTtlSecs` null when there's no limit) and `inUse` (what its sandboxes take now).", body = Object),
+        (status = 200, description = "`sandboxes`, newest first, each with `id`, `name`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `preparing` (true while it waits for its server to make its template), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon, HTTPS on the server's tailnet name, or null while `serverNeedsUpdate`), `serverNeedsUpdate` (its server joined before 0.52.0 and takes no commands until it's updated), `edgeUrl` (its server's edge proxy, or null), `ports` (each `port`, `public` and `url`), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt` (null when it runs until it's deleted), `pausedAt` and `endedAt`. Also `limits` (the team's, `maxTtlSecs` null when there's no limit) and `inUse` (what its sandboxes take now).", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -118,7 +118,7 @@ pub(crate) async fn list(
 #[utoipa::path(get, path = "/sandboxes/{id}", operation_id = "getSandbox", tag = "Sandboxes",
     params(("id" = String, Path, description = "The sandbox's id, `sbx_…`.")),
     responses(
-        (status = 200, description = "The sandbox, with `connection` (as in `createSandbox`) when you may use sandboxes and it lives. Otherwise `connection` is null and `connectionNote` says why: a read-only key, a viewer, or a sandbox that has ended.", body = Object),
+        (status = 200, description = "The sandbox, with `connection` (as in `createSandbox`) when you may use sandboxes and it lives. Otherwise `connection` is null and `connectionNote` says why: a read-only key, a viewer, a sandbox that has ended, or a server that needs an update.", body = Object),
         (status = 404, description = "No such sandbox, or you can't see it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -150,7 +150,7 @@ pub(crate) async fn get_one(
         (status = 400, description = "A size, lifetime or other value Pyo can't accept, or no `teamId` when you can use more than one team.", body = ErrorBody),
         (status = 403, description = "Your role, the API key's access or the team's sandbox limits don't allow it.", body = ErrorBody),
         (status = 404, description = "No such team, template, project or server.", body = ErrorBody),
-        (status = 409, description = "No sandbox server can run it: none yet, none with the template, or none with KVM for `isolation: vm`.", body = ErrorBody),
+        (status = 409, description = "No sandbox server can run it: none yet, none with the template, none with KVM for `isolation: vm`, or the servers need an update.", body = ErrorBody),
         (status = 502, description = "The server couldn't make `base` or `desktop`. The error says why.", body = ErrorBody),
         (status = 503, description = "Every sandbox server is full or down, the server asked for has no room, or `base` or `desktop` is still being made there. Try again soon.", body = ErrorBody),
     ),
@@ -205,6 +205,7 @@ pub(crate) async fn rename(
     responses(
         (status = 200, description = "The sandbox, now stopped or stopping.", body = Object),
         (status = 404, description = "No such sandbox.", body = ErrorBody),
+        (status = 409, description = "Its server needs an update.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("sandboxes"))))]
 pub(crate) async fn delete(
@@ -224,7 +225,7 @@ pub(crate) async fn delete(
     responses(
         (status = 200, description = "The sandbox, paused.", body = Object),
         (status = 404, description = "No such sandbox.", body = ErrorBody),
-        (status = 409, description = "It has ended, or isn't running.", body = ErrorBody),
+        (status = 409, description = "It has ended, isn't running, or its server needs an update.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("sandboxes"))))]
 pub(crate) async fn pause(
@@ -243,7 +244,7 @@ pub(crate) async fn pause(
     responses(
         (status = 200, description = "The sandbox, running.", body = Object),
         (status = 404, description = "No such sandbox.", body = ErrorBody),
-        (status = 409, description = "It has ended, or isn't paused.", body = ErrorBody),
+        (status = 409, description = "It has ended, isn't paused, or its server needs an update.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("sandboxes"))))]
 pub(crate) async fn resume(
@@ -307,7 +308,7 @@ pub struct OpenPort {
     responses(
         (status = 200, description = "`url`, `port` and `public`.", body = Object),
         (status = 404, description = "No such sandbox.", body = ErrorBody),
-        (status = 409, description = "It has ended, or its server has no edge proxy.", body = ErrorBody),
+        (status = 409, description = "It has ended, its server has no edge proxy, or its server needs an update.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("sandboxes"))))]
 pub(crate) async fn open_port(
@@ -333,7 +334,7 @@ pub(crate) async fn open_port(
     responses(
         (status = 200, description = "`port` and `closed`.", body = Object),
         (status = 404, description = "No such sandbox.", body = ErrorBody),
-        (status = 409, description = "It has ended.", body = ErrorBody),
+        (status = 409, description = "It has ended, or its server needs an update.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("sandboxes"))))]
 pub(crate) async fn close_port(
@@ -353,7 +354,7 @@ pub(crate) async fn close_port(
     responses(
         (status = 200, description = "The connection: `url`, `sandboxId`, `token` and `expiresAt`.", body = Connection),
         (status = 404, description = "No such sandbox.", body = ErrorBody),
-        (status = 409, description = "It has ended.", body = ErrorBody),
+        (status = 409, description = "It has ended, or its server needs an update.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("sandboxes"))))]
 pub(crate) async fn token(
@@ -370,7 +371,7 @@ pub(crate) async fn token(
 #[utoipa::path(get, path = "/sandbox-servers", operation_id = "listSandboxServers", tag = "Sandboxes",
     params(TeamQuery),
     responses(
-        (status = 200, description = "`servers`, each with `id`, `teamId` (null for the installation's), `name`, `address`, `state` (\"joining\", \"ready\", \"unreachable\" or \"refused\"), `enabled`, `runtime` (\"firecracker\" or \"gvisor\", what runs its sandboxes, null until it reports), `capability` (`runtime`, `kvm`, `bootMs`, `arch`, `cpus`, `memory`, `disk`, `gvisorVersion` and the checks), `summary` (one line about it), `capacity`, `templates`, `daemonVersion`, `lastReportAt`, `error`, `sandboxes` (how many run there), `createdAt`, `edgeDomain` and, with an edge domain, `edge`: its `domain`, `https` (whether it serves HTTPS), `cert` (`state`: \"none\", \"issuing\", \"ready\" or \"failed\", `notAfter`, `issuedAt`, `error`, `served`), `cloudflare` (the connected zone that covers it: `teamId`, `zone`, `canEdit`, or null) and `dns` (`name`, the `records` to point it at the server, and what Pyo `made`).", body = Object),
+        (status = 200, description = "`servers`, each with `id`, `teamId` (null for the installation's), `name`, `address`, `state` (\"joining\", \"ready\", \"unreachable\" or \"refused\"), `enabled`, `runtime` (\"firecracker\" or \"gvisor\", what runs its sandboxes, null until it reports), `capability` (`runtime`, `kvm`, `bootMs`, `arch`, `cpus`, `memory`, `disk`, `gvisorVersion` and the checks), `summary` (one line about it), `capacity`, `templates`, `daemonVersion`, `lastReportAt`, `error`, `sandboxes` (how many run there), `createdAt`, `outbound` (it gets its work over its channel), `tailnetName` (its name on the team's tailnet), `needsUpdate` (it joined before 0.52.0 and takes no commands until resetSandboxServerAccess gives the command that updates it), `edgeDomain` and, with an edge domain, `edge`: its `domain`, `https` (whether it serves HTTPS), `cert` (`state`: \"none\", \"issuing\", \"ready\" or \"failed\", `notAfter`, `issuedAt`, `error`, `served`), `cloudflare` (the connected zone that covers it: `teamId`, `zone`, `canEdit`, or null) and `dns` (`name`, the `records` to point it at the server, and what Pyo `made`).", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -501,9 +502,10 @@ pub(crate) async fn create_join_code(
 /// The server's key stops working at once, and its waiting commands fail.
 /// Answers with a new command for the same server, which works once, for 15
 /// minutes. Run it there to join again. On a self-hosted Pyo, a server that
-/// shows `needsUpdate` gets the command that updates it instead: it keeps
-/// working until the command runs there. Team owners and admins, or the
-/// installation's admin for its own servers.
+/// shows `needsUpdate` gets the command that updates it instead (Update):
+/// it takes no commands until the command runs there. Its sandboxes keep
+/// running. Team owners and admins, or the installation's admin for its own
+/// servers.
 #[utoipa::path(post, path = "/sandbox-servers/{id}/reset-access", operation_id = "resetSandboxServerAccess", tag = "Sandboxes",
     params(("id" = String, Path, description = "The sandbox server's id, `sbs_…`.")),
     responses(
@@ -635,7 +637,7 @@ pub(crate) async fn list_templates(
     tx.commit().await?;
     let rows = super::with_builtins(&s.db, None, rows).await;
     Ok(Json(
-        json!({ "templates": super::live_views(&s, rows).await }),
+        json!({ "templates": super::live_views(rows).await }),
     ))
 }
 

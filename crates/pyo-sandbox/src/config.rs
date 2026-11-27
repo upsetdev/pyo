@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// This server's ID in Pyo. Tokens name it.
     pub server_id: String,
-    /// The daemon API listens here only. In production that's the
-    /// server's tailnet address, so the API never faces the internet.
+    /// The server's tailnet address. The API answers HTTPS on its IP at
+    /// :7443 (`tailnet_https` may say otherwise), so it never faces the
+    /// internet. Its port is no longer used: until 0.52.0 the API answered
+    /// plain HTTP there for Pyo's own calls.
     pub listen: SocketAddr,
     /// The storage pool. See `storage` for the layout.
     #[serde(default = "default_root")]
@@ -69,8 +71,9 @@ pub struct Config {
     /// jailer, seccomp per jail or cgroups. Never on a real server.
     #[serde(default)]
     pub dev: bool,
-    /// A server that works for Pyo over HTTPS (Pyo Cloud): it polls Pyo for
-    /// its commands instead of Pyo calling it. See `outbound`.
+    /// How the server works for Pyo: it polls Pyo for its commands over
+    /// HTTPS. See `outbound`. `serve` needs it: a config without it is from
+    /// a server that joined before 0.52.0 ([`crate::NEEDS_UPDATE`]).
     #[serde(default)]
     pub outbound: Option<crate::outbound::OutboundConfig>,
     /// HTTPS on the tailnet name, for an outbound server. See `tailnet`.

@@ -186,7 +186,7 @@ PYO_SECRET_KEY=$(openssl rand -hex 32) cargo test -p pyo-api --lib -- --ignored 
   cloudflare::http_tests admin_sign_in_tests vault::tests
 cargo test -p pyo-api --lib -- --ignored compose_sync::db_tests
 cargo test -p pyo-api --lib -- --ignored tailscale::tests
-cargo test -p pyo-api --lib -- --ignored sandbox::outbound::tests
+cargo test -p pyo-api --lib -- --ignored sandbox::outbound::tests sandbox::outbound::self_hosted_tests
 cargo test -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests registry::tests
 cargo test -p pyo-api --lib -- --ignored agent:: agent_auth:: builders:: terminal:: jobs::
 cargo test -p pyo-api --lib -- --ignored ops:: routes:: source_uploads:: registrydoor::
@@ -195,8 +195,8 @@ cargo test -p pyo-api --lib -- --ignored teambackup::tests backup::tests::export
 cargo test -p pyo-api --lib -- --ignored platform_import::tests previews::tests
 cargo test -p pyo-api --lib -- --ignored ratelimit::tests twofactor::tests cli::tests \
   github::tests install:: cloud::bootstrap::tests
-cargo test -p pyo-api --lib -- --ignored sandbox::tests sandbox::join::tests \
-  sandbox::keys::tests sandbox::base::tests
+cargo test -p pyo-api --lib -- --ignored sandbox::tests sandbox::keys::tests \
+  sandbox::base::tests
 cargo test -p pyo-api --lib -- --ignored migrate::tests
 ```
 

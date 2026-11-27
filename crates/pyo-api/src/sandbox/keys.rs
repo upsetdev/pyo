@@ -8,15 +8,16 @@
 //! - Client tokens ([`client_token`]): one sandbox, about an hour, for exec,
 //!   terminals, files and ports. Pause, resume and delete go through Pyo, so
 //!   its records stay right.
-//! - Admin tokens ([`admin_token`]): every sandbox on one server, five
-//!   minutes, for Pyo's own calls to the daemon.
+//! - Pyo signs no tokens for its own calls: they go to the server over its
+//!   channel, signed as commands (outbound/signer.rs). Until 0.52.0 Pyo
+//!   called daemons with admin and create tokens. Daemons refuse those now.
 //! - Registry tokens ([`registry_token`]): pull one team's images from
 //!   Pyo's registry door for an hour, while a server makes a template.
 //!   No daemon takes them.
 
 use std::sync::{Arc, Mutex};
 
-use pyo_proto::sandbox::token::{ANY_SANDBOX, Claims, SigningKey, VerifyingKey};
+use pyo_proto::sandbox::token::{Claims, SigningKey, VerifyingKey};
 use pyo_proto::sandbox::wire::Scope;
 use sqlx::PgPool;
 
@@ -25,8 +26,6 @@ use crate::secrets::Sealer;
 
 /// How long a client token lives. The SDK asks for a new one before.
 pub const CLIENT_TTL_SECS: u64 = 3600;
-/// How long Pyo's own tokens live: one call each.
-pub const ADMIN_TTL_SECS: u64 = 300;
 /// How long a sandbox server may pull a template's image from Pyo's
 /// registry: long enough for a big image.
 pub const REGISTRY_TTL_SECS: u64 = 3600;
@@ -141,19 +140,6 @@ pub fn client_token(key: &SigningKey, sandbox: &str, team: &str, server: &str) -
     sign(key, sandbox, team, server, &CLIENT_SCOPES, CLIENT_TTL_SECS)
 }
 
-/// Pyo's own token for everything on one server.
-pub fn admin_token(key: &SigningKey, server: &str) -> String {
-    sign(
-        key,
-        ANY_SANDBOX,
-        "",
-        server,
-        &[Scope::Admin],
-        ADMIN_TTL_SECS,
-    )
-    .token
-}
-
 /// The team a registry token names for an installation's template: it may
 /// pull Pyo's own images (`pyo/<name>`) and no team's.
 pub const PYO_IMAGES_ONLY: &str = "pyo";
@@ -190,11 +176,6 @@ pub fn check_registry_token(keys: &[VerifyingKey], token: &str) -> Option<String
     .ok()?;
     // Only a token made for this, never one that has it through admin.
     (c.scopes == [Scope::Registry] && !c.team.is_empty()).then_some(c.team)
-}
-
-/// Pyo's token to create one sandbox for its team.
-pub fn create_token(key: &SigningKey, sandbox: &str, team: &str, server: &str) -> String {
-    sign(key, sandbox, team, server, &[Scope::Create], ADMIN_TTL_SECS).token
 }
 
 #[cfg(test)]
@@ -273,22 +254,6 @@ mod tests {
     }
 
     #[test]
-    fn admin_tokens_cover_one_server_briefly() {
-        let k = SigningKey::generate("sbk_test");
-        let keys = [k.verifying_key()];
-        let t = admin_token(&k, "sbs_one");
-        let c = verify(&t, &keys, expect(None, Scope::Admin)).unwrap();
-        assert_eq!(c.exp - c.iat, ADMIN_TTL_SECS);
-        verify(&t, &keys, expect(Some(SBX), Scope::Lifecycle)).unwrap();
-        let mut other = expect(None, Scope::Admin);
-        other.server = "sbs_two";
-        assert_eq!(verify(&t, &keys, other), Err(TokenError::WrongServer));
-        let c = create_token(&k, SBX, "tm_one", "sbs_one");
-        let claims = verify(&c, &keys, expect(Some(SBX), Scope::Create)).unwrap();
-        assert_eq!(claims.team, "tm_one");
-    }
-
-    #[test]
     fn registry_tokens_only_open_the_registry() {
         let k = SigningKey::generate("sbk_test");
         let keys = [k.verifying_key()];
@@ -300,10 +265,15 @@ mod tests {
             Err(TokenError::WrongServer)
         );
         // Other tokens don't open the registry.
-        assert_eq!(
-            check_registry_token(&keys, &admin_token(&k, "sbs_one")),
-            None
+        let admin = sign(
+            &k,
+            pyo_proto::sandbox::token::ANY_SANDBOX,
+            "",
+            "sbs_one",
+            &[Scope::Admin],
+            300,
         );
+        assert_eq!(check_registry_token(&keys, &admin.token), None);
         let c = client_token(&k, SBX, "tm_one", "sbs_one");
         assert_eq!(check_registry_token(&keys, &c.token), None);
         let other = SigningKey::generate("sbk_other");

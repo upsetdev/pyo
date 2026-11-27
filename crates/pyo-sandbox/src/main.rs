@@ -24,12 +24,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Detect the runtime, adopt running VMs and serve the API.
+    /// Detect the runtime, adopt running VMs, work for Pyo over its channel
+    /// and serve the API on the tailnet.
     Serve(Opts),
     /// Detect the runtime and print the capability report as JSON.
     Detect(Opts),
-    /// Join Pyo over HTTPS with the one-time code in the join file (Pyo
-    /// Cloud), and write the config `serve` reads.
+    /// Join Pyo over HTTPS with the one-time code in the join file, and
+    /// write the config `serve` reads.
     Join(JoinOpts),
 }
 
@@ -204,6 +205,11 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
     if s.cfg.listen.ip().is_unspecified() && !s.cfg.dev {
         bail!("The daemon API must listen on the tailnet address, not on every address.");
     }
+    // A server that joined at Pyo's tailnet door before 0.52.0: Pyo no
+    // longer calls it, and it has no channel until it joins again.
+    let Some(outbound) = s.cfg.outbound.clone() else {
+        bail!(pyo_sandbox::NEEDS_UPDATE);
+    };
     let mut capability = detect::detect(Inputs {
         fc: &s.fc,
         layout: &s.layout,
@@ -221,7 +227,6 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
     let server_id = s.cfg.server_id.clone();
     let listen = s.cfg.listen;
     let edge_cfg = s.cfg.edge.clone();
-    let outbound = s.cfg.outbound.clone();
     let tailnet_https = s
         .cfg
         .tailnet_https
@@ -264,28 +269,25 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
         tracing::info!(https = ?bound.https, http = ?bound.http, url = ?url, "the edge proxy is serving");
         mgr.set_edge_url(url);
     }
+    // Pyo never calls this server: it calls Pyo for its work, and serves
+    // browsers and SDKs on the tailnet over HTTPS.
     let app = api::router(state.clone());
-    if let Some(o) = outbound {
-        // Pyo can't call this server: it calls Pyo, and serves browsers
-        // and SDKs on the tailnet over HTTPS.
-        let at = tailnet_https.listen.unwrap_or(std::net::SocketAddr::new(
-            listen.ip(),
-            pyo_proto::sandbox::outbound::TAILNET_PORT,
-        ));
-        tailnet::serve(app.clone(), at, &o.tailnet_name, &tailnet_https).await?;
-        let client = outbound::Client::load(
-            state.clone(),
-            outbound::store::Store::new(&root),
-            &o,
-            &server_id,
-            outbound::Timing::default(),
-        )?;
-        tokio::spawn(client.run());
-    }
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("listening on {listen}"))?;
-    tracing::info!(%listen, "pyo-sandbox is serving");
-    axum::serve(listener, app).await?;
+    let at = tailnet_https.listen.unwrap_or(std::net::SocketAddr::new(
+        listen.ip(),
+        pyo_proto::sandbox::outbound::TAILNET_PORT,
+    ));
+    let bound = tailnet::serve(app, at, &outbound.tailnet_name, &tailnet_https).await?;
+    tracing::info!(listen = %bound, "pyo-sandbox is serving");
+    let client = outbound::Client::load(
+        state.clone(),
+        outbound::store::Store::new(&root),
+        &outbound,
+        &server_id,
+        outbound::Timing::default(),
+    )?;
+    client.run().await;
+    // Pyo no longer takes its key: its sandboxes keep running, and the
+    // tailnet keeps reaching them.
+    std::future::pending::<()>().await;
     Ok(())
 }

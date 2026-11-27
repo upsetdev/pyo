@@ -1,9 +1,9 @@
 //! How far a template got on the servers making it, asked of them as the
-//! templates list is read. The runner reads every server's report each
-//! [`super::runner::TICK`], too slow for a progress bar. While a server
+//! templates list is read. Each server posts its report every 15 seconds,
+//! too slow for a progress bar. While a server
 //! builds a template, the list asks it with `Template`, which answers from
 //! memory, and lays the answer over what the last report said. Nothing is
-//! saved: the next round saves the report as before.
+//! saved: the next report saves it as before.
 //!
 //! - Answers are kept for [`FRESH`], so many pages open at once ask each
 //!   server once a second at most.
@@ -19,8 +19,7 @@ use futures::StreamExt;
 use pyo_proto::sandbox::{DaemonCommand, DaemonResult, TemplateReport, TemplateState};
 use serde_json::{Value, json};
 
-use super::{daemon::Daemon, keys};
-use crate::AppState;
+use super::daemon::Daemon;
 
 const FRESH: Duration = Duration::from_millis(900);
 const WAIT: Duration = Duration::from_millis(1500);
@@ -44,7 +43,7 @@ fn building(rows: &[Value]) -> Vec<(String, String)> {
 }
 
 /// Lays what the servers say now over `rows`.
-pub async fn overlay(s: &AppState, rows: &mut [Value]) {
+pub async fn overlay(rows: &mut [Value]) {
     let wanted = building(rows);
     if wanted.is_empty() {
         return;
@@ -63,7 +62,7 @@ pub async fn overlay(s: &AppState, rows: &mut [Value]) {
             .collect()
     };
     if !stale.is_empty() {
-        ask(s, stale).await;
+        ask(stale).await;
     }
     let cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
     let answers: HashMap<&(String, String), &TemplateReport> = wanted
@@ -85,46 +84,17 @@ pub async fn overlay(s: &AppState, rows: &mut [Value]) {
 }
 
 /// Asks each server how far its templates got, and keeps the answers.
-async fn ask(s: &AppState, keys_: Vec<(String, String)>) {
-    let ids: Vec<String> = keys_.iter().map(|(id, _)| id.clone()).collect();
-    let addresses: HashMap<String, String> = match sqlx::query_as::<_, (String, String)>(
-        "SELECT id, address FROM pyo.sandbox_servers WHERE id = ANY($1) AND address IS NOT NULL",
-    )
-    .bind(&ids)
-    .fetch_all(&s.db)
-    .await
-    {
-        Ok(v) => v.into_iter().collect(),
-        Err(e) => {
-            tracing::debug!(error = %e, "sandbox templates: couldn't find the servers to ask");
-            return;
-        }
-    };
-    let Ok(key) = keys::signing_key(&s.db, &s.sealer).await else {
-        return;
-    };
+async fn ask(keys_: Vec<(String, String)>) {
     let answers: Vec<((String, String), Option<TemplateReport>)> = futures::stream::iter(keys_)
-        .map(|(id, name)| {
-            let key = key.clone();
-            let address = addresses.get(&id).cloned();
-            async move {
-                let answer = match address {
-                    Some(a) => {
-                        let token = keys::admin_token(&key, &id);
-                        let cmd = DaemonCommand::Template {
-                            template: name.clone(),
-                        };
-                        match tokio::time::timeout(WAIT, Daemon::new(&id, &a).command(&token, &cmd))
-                            .await
-                        {
-                            Ok(Ok(DaemonResult::Template { template })) => Some(template),
-                            _ => None,
-                        }
-                    }
-                    None => None,
-                };
-                ((id, name), answer)
-            }
+        .map(|(id, name)| async move {
+            let cmd = DaemonCommand::Template {
+                template: name.clone(),
+            };
+            let answer = match tokio::time::timeout(WAIT, Daemon::new(&id).command(&cmd)).await {
+                Ok(Ok(DaemonResult::Template { template })) => Some(template),
+                _ => None,
+            };
+            ((id, name), answer)
         })
         .buffer_unordered(8)
         .collect()
