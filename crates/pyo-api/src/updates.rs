@@ -1560,7 +1560,8 @@ mod tests {
             }]),
             "the traffic store answers the agent and Vector only"
         );
-        // The agent: its relay, for Vector only, from any server.
+        // The agent: its relay, for Vector only, and the tunnel gate's
+        // question, for the tunnel's connectors only. From any server.
         let agent = find("NetworkPolicy", "pyo-agent");
         assert_eq!(
             agent["spec"]["podSelector"],
@@ -1569,11 +1570,17 @@ mod tests {
         assert_eq!(agent["spec"]["policyTypes"], json!(["Ingress"]));
         assert_eq!(
             agent["spec"]["ingress"],
-            json!([{
-                "from": [{ "podSelector": { "matchLabels": { "app.kubernetes.io/name": pyo_proto::traffic::VECTOR } } }],
-                "ports": [{ "port": pyo_proto::system::AGENT_RELAY_PORT }],
-            }]),
-            "the agent's relay answers Vector only"
+            json!([
+                {
+                    "from": [{ "podSelector": { "matchLabels": { "app.kubernetes.io/name": pyo_proto::traffic::VECTOR } } }],
+                    "ports": [{ "port": pyo_proto::system::AGENT_RELAY_PORT }],
+                },
+                {
+                    "from": [{ "podSelector": { "matchLabels": { "app.kubernetes.io/name": pyo_proto::system::TUNNEL_APP } } }],
+                    "ports": [{ "port": pyo_proto::system::TUNNEL_GATE_PORT }],
+                },
+            ]),
+            "the agent answers Vector on its relay and the tunnel's connectors on the gate only"
         );
         // Pyo's own front: never from a project's pods (Pyo believes
         // X-Forwarded-For from the pod network). Its own namespace, the
