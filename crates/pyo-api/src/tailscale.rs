@@ -3328,51 +3328,6 @@ mod tests {
         })
     }
 
-    /// Pyo's calls to a sandbox server that joined through a cluster go
-    /// through that cluster's agent, and leave nothing behind.
-    #[test]
-    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
-    fn sandbox_calls_go_through_the_cluster() {
-        run_big(async {
-            let (s, cluster) = db().await;
-            crate::sandbox::daemon::init(s.clone());
-            let address = format!(
-                "100.64.{}.{}",
-                rand::random::<u8>() % 64,
-                1 + rand::random::<u8>() % 250
-            );
-            let server = crate::ids::new_id("sbs");
-            sqlx::query("INSERT INTO pyo.sandbox_servers (id, name, state, created_by, address, via_cluster) VALUES ($1, $1, 'ready', 'test', $2, $3)")
-                .bind(&server)
-                .bind(&address)
-                .bind(&cluster)
-                .execute(&s.db)
-                .await
-                .unwrap();
-            let agent = tokio::spawn(agent_answers(
-                s.db.clone(),
-                cluster.clone(),
-                "sandbox_call",
-                // Bytes both ways: the agent answers in base64 too.
-                json!({ "status": 200, "body": "eyJieXRlcyI6IDV9" }),
-            ));
-            let d = crate::sandbox::daemon::Daemon::new(&server, &address);
-            let n = d
-                .write_file("tok", "sbx_1", "/a b", b"hello".to_vec())
-                .await
-                .unwrap();
-            assert_eq!(n, 5);
-            let sent = agent.await.unwrap();
-            assert_eq!(sent["address"], json!(address));
-            assert_eq!(sent["method"], "PUT");
-            assert_eq!(sent["path"], "/v1/sandboxes/sbx_1/files?path=%2Fa+b");
-            assert_eq!(sent["token"], "tok");
-            assert_eq!(sent["raw"], true);
-            assert_eq!(sent["body"], "aGVsbG8=");
-            assert_eq!(commands(&s.db, &cluster, "sandbox_call").await, 0);
-        })
-    }
-
     /// A sync's answer: names kept, the rest retired, machines taken off
     /// forgotten, and the servers told what to host.
     #[test]

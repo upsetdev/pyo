@@ -1,19 +1,19 @@
-//! The sandbox loop, on one worker at a time: every [`TICK`] it reads each
-//! sandbox server's report over the tailnet, keeps servers and sandboxes in
-//! step with it, meters usage per minute, and ends sandboxes past their
+//! The sandbox loop, on one worker at a time: every [`TICK`] it sweeps the
+//! servers' channels, keeps Pyo's templates, ends sandboxes past their
 //! lifetime (the daemons end them too, so they end on time while Pyo is
-//! down). It does nothing, not even take its lock, until the first sandbox
-//! server exists.
+//! down) and retries deletes. Each server posts its report over its
+//! channel ([`apply_in`] keeps servers and sandboxes in step with it and
+//! meters usage per minute). It does nothing, not even take its lock,
+//! until the first sandbox server exists.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use futures::StreamExt;
 use pyo_proto::sandbox::{DaemonCommand, ErrorCode, Runtime, SandboxState, ServerReport};
 use serde_json::json;
 use sqlx::PgPool;
 
-use super::{daemon::Daemon, end, keys, save_status};
+use super::{daemon::Daemon, end, save_status};
 use crate::AppState;
 
 pub const TICK: Duration = Duration::from_secs(15);
@@ -60,12 +60,10 @@ async fn any_servers(db: &PgPool) -> sqlx::Result<bool> {
 #[derive(sqlx::FromRow)]
 pub(crate) struct Server {
     pub id: String,
-    pub team_id: Option<String>,
-    pub address: String,
     pub state: String,
 }
 
-/// One round: reports, then lifetimes.
+/// One round: housekeeping, then lifetimes.
 pub async fn round(s: &AppState) -> anyhow::Result<()> {
     let _ = super::join::prune(&s.db).await;
     if let Err(e) = super::outbound::channel::sweep(&s.db).await {
@@ -75,52 +73,7 @@ pub async fn round(s: &AppState) -> anyhow::Result<()> {
     if let Err(e) = super::base::ensure_all(s).await {
         tracing::warn!(error = %format!("{e:#}"), "sandboxes: couldn't keep Pyo's templates");
     }
-    let servers: Vec<Server> = sqlx::query_as(
-        // Outbound servers (Pyo Cloud) post their reports (outbound/channel.rs).
-        "SELECT id, team_id, address, state FROM pyo.sandbox_servers WHERE address IS NOT NULL AND state <> 'refused' AND NOT outbound",
-    )
-    .fetch_all(&s.db)
-    .await?;
-    if !servers.is_empty() {
-        let key = keys::signing_key(&s.db, &s.sealer)
-            .await
-            .map_err(|e| anyhow::anyhow!(e.message))?;
-        futures::stream::iter(servers)
-            .for_each_concurrent(8, |srv| {
-                let key = key.clone();
-                async move {
-                    let token = keys::admin_token(&key, &srv.id);
-                    let r = Daemon::new(&srv.id, &srv.address).report(&token).await;
-                    let res = match r {
-                        Ok(report) => {
-                            let applied = apply_report(&s.db, &srv, &report).await;
-                            if applied.is_ok() && report.server_id == srv.id {
-                                // Templates it lacks, and ones Pyo dropped.
-                                if let Err(e) = super::templates::sync_server(
-                                    &s.db,
-                                    &key,
-                                    &srv.id,
-                                    srv.team_id.as_deref(),
-                                    &srv.address,
-                                    &report,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(server = %srv.id, error = %e, "sandboxes: couldn't sync templates");
-                                }
-                            }
-                            applied
-                        }
-                        Err(e) => missed_report(&s.db, &srv, &e.message).await,
-                    };
-                    if let Err(e) = res {
-                        tracing::warn!(server = %srv.id, error = %e, "sandboxes: couldn't save a report");
-                    }
-                }
-            })
-            .await;
-    }
-    // Outbound servers' reports come in over their channel: theirs count too.
+    // The servers' reports come in over their channel.
     if let Err(e) = super::templates::update_states(&s.db).await {
         tracing::warn!(error = %e, "sandboxes: couldn't update template states");
     }
@@ -128,23 +81,9 @@ pub async fn round(s: &AppState) -> anyhow::Result<()> {
     super::edgecert::run(s).await
 }
 
-/// Saves a report: the server's capability and capacity, its sandboxes'
-/// states, and the seconds they ran since the last report.
-async fn apply_report(db: &PgPool, srv: &Server, r: &ServerReport) -> sqlx::Result<()> {
-    if r.server_id != srv.id {
-        return missed_report(
-            db,
-            srv,
-            "The daemon there belongs to another sandbox server.",
-        )
-        .await;
-    }
-    let mut tx = db.begin().await?;
-    apply_in(&mut tx, srv, r).await?;
-    tx.commit().await
-}
-
-/// [`apply_report`] in a transaction, for a report that is the server's own.
+/// Saves a report, in a transaction, for a report that is the server's
+/// own: the server's capability and capacity, its sandboxes' states, and
+/// the seconds they ran since the last report.
 pub(crate) async fn apply_in(
     tx: &mut sqlx::PgConnection,
     srv: &Server,
@@ -244,28 +183,10 @@ async fn meter(
     Ok(())
 }
 
-/// No report: unreachable once the last one is old.
-async fn missed_report(db: &PgPool, srv: &Server, why: &str) -> sqlx::Result<()> {
-    let n = sqlx::query(
-        "UPDATE pyo.sandbox_servers SET state = 'unreachable', error = $2, updated_at = now()
-          WHERE id = $1 AND state <> 'unreachable'
-            AND coalesce(last_report_at, joined_at, created_at) < now() - make_interval(secs => $3)",
-    )
-    .bind(&srv.id)
-    .bind(why)
-    .bind(UNREACHABLE_SECS as f64)
-    .execute(db)
-    .await?
-    .rows_affected();
-    if n > 0 {
-        tracing::warn!(server = %srv.id, %why, "sandbox server is unreachable");
-    }
-    Ok(())
-}
-
-/// A sandbox to end: its id, server and address, whether it's past its
-/// lifetime, and whether its server is outbound and not ready.
-type Due = (String, Option<String>, Option<String>, bool, bool);
+/// A sandbox to end: its id and server, whether it's past its lifetime,
+/// and whether its server can't be asked now (not ready, or it joined the
+/// old way and needs an update).
+type Due = (String, Option<String>, bool, bool);
 
 /// Ends what's past its lifetime, retries deletes that didn't reach their
 /// server, and fails creates that never finished.
@@ -280,12 +201,13 @@ async fn sweep(s: &AppState) -> anyhow::Result<()> {
     for id in stuck {
         end(&mut c, &id, "failed", Some("It didn't start in time.")).await?;
     }
-    // An outbound server that isn't ready is asked nothing: its answer
-    // would only come at its next poll.
+    // A server that isn't ready is asked nothing: its answer would only
+    // come at its next poll. One that joined the old way isn't on the
+    // channel until it's updated.
     let due: Vec<Due> = sqlx::query_as(
-        "SELECT x.id, x.server_id, sv.address,
+        "SELECT x.id, x.server_id,
                 coalesce(x.expires_at < now() - make_interval(secs => $1), false),
-                coalesce(sv.outbound AND sv.state <> 'ready', false)
+                coalesce(NOT sv.outbound OR sv.state <> 'ready', false)
            FROM pyo.sandboxes x LEFT JOIN pyo.sandbox_servers sv ON sv.id = x.server_id
           WHERE x.state NOT IN ('stopped', 'failed')
             AND (x.state = 'stopping' OR x.expires_at < now() - make_interval(secs => $1))
@@ -297,16 +219,12 @@ async fn sweep(s: &AppState) -> anyhow::Result<()> {
     if due.is_empty() {
         return Ok(());
     }
-    let key = keys::signing_key(&s.db, &s.sealer)
-        .await
-        .map_err(|e| anyhow::anyhow!(e.message))?;
-    for (id, server, address, expired, asleep) in due {
-        let gone = match (server, address) {
+    for (id, server, expired, asleep) in due {
+        let gone = match server {
             _ if asleep => false,
-            (Some(server), Some(address)) => {
-                let token = keys::admin_token(&key, &server);
-                match Daemon::new(&server, &address)
-                    .command(&token, &DaemonCommand::Delete { id: id.clone() })
+            Some(server) => {
+                match Daemon::new(&server)
+                    .command(&DaemonCommand::Delete { id: id.clone() })
                     .await
                 {
                     Ok(_) => true,
@@ -317,7 +235,7 @@ async fn sweep(s: &AppState) -> anyhow::Result<()> {
                     }
                 }
             }
-            _ => true,
+            None => true,
         };
         // Past its lifetime, its server ends it on its own.
         if gone || expired {

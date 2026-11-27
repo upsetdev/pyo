@@ -232,16 +232,6 @@ fn a_teams_server_joins_over_the_tailnet() {
         assert!(outbound);
         assert_eq!(via.as_deref(), Some(t.holder.as_str()));
 
-        // The door doesn't take its code.
-        let body = serde_json::to_vec(&json!({ "code": j.code, "address": "100.64.0.20", "jailUid": 0, "jailGid": 0 })).unwrap();
-        let (st, msg) =
-            join::answer(&s.db, &s.sealer, "100.64.0.20".parse().unwrap(), &j.server_id, &body).await;
-        assert_eq!((st, msg), (StatusCode::FORBIDDEN, join::Refusal::Gone.message()));
-        // So a new one, for the channel.
-        let agent = holder_agent(s.db.clone(), t.holder.clone());
-        let j = add(&s, signer.as_ref(), &t.admin, Some(&t.id), "sbx-a", None, &at).await;
-        agent.abort();
-        let j = j.unwrap();
 
         let k = new_key();
         let a = join(&s.db, &s.sealer, &signer.public_keys(), "https://unused.example.com", false, &join_ask(&j, &t, &k))
@@ -393,8 +383,9 @@ fn the_installations_server_works_the_channel() {
     })
 }
 
-/// A server that joined at the door before: Pyo still calls it, the
-/// dashboard asks for an update, **Update** gives a command without
+/// A server that joined at the door before 0.52.0: Pyo doesn't call it,
+/// every command against it and its sandboxes says to update it, and the
+/// dashboard asks for an update. **Update** gives a command without
 /// stopping anything, and its join over the channel moves it.
 #[test]
 #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
@@ -424,6 +415,64 @@ fn a_server_from_the_door_moves_to_the_channel() {
         let v = view().await;
         assert_eq!((v["outbound"].clone(), v["needsUpdate"].clone()), (json!(false), json!(true)), "{v}");
 
+        // A sandbox on it: shown as needing the update, and every command
+        // says so, plainly, before anything is sent.
+        let sbx = format!("sbx_old{}", crate::ids::random_string(8).to_lowercase());
+        sqlx::query(
+            "INSERT INTO pyo.sandboxes (id, team_id, server_id, spec, state, created_by, expires_at, name)
+             VALUES ($1, $2, $3, '{}', 'running', 'test', now() + interval '1 hour', 'old one')",
+        )
+        .bind(&sbx)
+        .bind(&t.id)
+        .bind(&id)
+        .execute(&s.db)
+        .await
+        .unwrap();
+        let sbx_view = crate::sandbox::sandbox_views(&s.db, std::slice::from_ref(&t.id), Some(&sbx), false)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!((sbx_view["serverNeedsUpdate"].clone(), sbx_view["url"].clone()), (json!(true), json!(null)), "{sbx_view}");
+        let user = t.admin.clone();
+        let needs = |e: crate::error::ApiError| (e.status, e.message);
+        let want = (StatusCode::CONFLICT, crate::sandbox::NEEDS_UPDATE.to_owned());
+        assert_eq!(needs(crate::sandbox::token(&s, &user, &sbx).await.unwrap_err()), want);
+        assert_eq!(needs(crate::sandbox::pause(&s, &user, &sbx).await.unwrap_err()), want);
+        assert_eq!(needs(crate::sandbox::delete(&s, &user, &sbx).await.unwrap_err()), want);
+        assert_eq!(needs(crate::sandbox::open_port(&s, &user, &sbx, 3000, false).await.unwrap_err()), want);
+        let f = crate::sandbox::find(&s, &user, &sbx, crate::sandbox::Need::Use).await.unwrap();
+        assert_eq!(needs(f.daemon().err().unwrap()), want);
+        let got = crate::sandbox::get(&s, &user, &sbx).await.unwrap();
+        assert_eq!((got["connection"].clone(), got["connectionNote"].clone()), (json!(null), json!(crate::sandbox::NEEDS_UPDATE)), "{got}");
+        let state: String = sqlx::query_scalar("SELECT state FROM pyo.sandboxes WHERE id = $1")
+            .bind(&sbx)
+            .fetch_one(&s.db)
+            .await
+            .unwrap();
+        assert_eq!(state, "running", "a refused delete leaves it as it was");
+        // A new sandbox isn't placed on it: named, or not.
+        sqlx::query("INSERT INTO pyo.sandbox_templates (id, team_id, name, source, state, created_by) VALUES ($1, $2, 'busybox', '{\"kind\":\"image\",\"image\":\"busybox\"}', 'ready', 'test')")
+            .bind(format!("stp_{sbx}"))
+            .bind(&t.id)
+            .execute(&s.db)
+            .await
+            .unwrap();
+        let req = |server: Option<&str>| -> crate::sandbox::CreateSandbox {
+            serde_json::from_value(json!({ "teamId": t.id, "template": "busybox", "server": server, "ttl": "5m", "network": "none" })).unwrap()
+        };
+        let e = crate::sandbox::create(&s, &user, req(Some("sbx-old"))).await.unwrap_err();
+        assert_eq!(needs(e), want);
+        // Unnamed: never placed on it. Other tests' installation servers may
+        // be in this database, so the reason varies (scheduler.rs tests the
+        // one for a team whose servers all need an update).
+        assert!(crate::sandbox::create(&s, &user, req(None)).await.is_err());
+        let placed: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.sandboxes WHERE server_id = $1")
+            .bind(&id)
+            .fetch_one(&s.db)
+            .await
+            .unwrap();
+        assert_eq!(placed, 1, "only the one from before");
+
         // Update: the command, and nothing stops.
         let at = on_tailnet_of(&t);
         let e = reset_access(&s, signer.as_ref(), &t.developer, &id, &Mode::SelfHosted(at.clone())).await.unwrap_err();
@@ -443,7 +492,7 @@ fn a_server_from_the_door_moves_to_the_channel() {
                 .fetch_one(&s.db)
                 .await
                 .unwrap();
-        assert_eq!((outbound, state.as_str()), (false, "ready"), "still called directly");
+        assert_eq!((outbound, state.as_str()), (false, "ready"), "nothing changes until it joins");
 
         // Run there: it joins over the channel, and Pyo stops calling it.
         let k = new_key();
@@ -456,6 +505,15 @@ fn a_server_from_the_door_moves_to_the_channel() {
         let app = app(&s, signer.clone());
         let key = Key(a.key_id, k);
         assert_eq!(call(&app, Method::GET, "/commands?wait=0", Some(&key), b"").await.0, StatusCode::OK);
+        // Its sandbox reads as one Pyo reaches again.
+        let f = crate::sandbox::find(&s, &user, &sbx, crate::sandbox::Need::Use).await.unwrap();
+        assert!(f.daemon().is_ok());
+        let sbx_view = crate::sandbox::sandbox_views(&s.db, std::slice::from_ref(&t.id), Some(&sbx), false)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(sbx_view["serverNeedsUpdate"], json!(false), "{sbx_view}");
+        assert_eq!(sbx_view["url"], json!(format!("https://sbx-1.{}:{}", t.suffix, wire::TAILNET_PORT)), "{sbx_view}");
         cleanup(&s, &t).await;
     })
 }

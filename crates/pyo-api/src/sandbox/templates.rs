@@ -264,7 +264,6 @@ pub async fn sync_server(
     key: &SigningKey,
     server_id: &str,
     server_team: Option<&str>,
-    address: &str,
     report: &ServerReport,
 ) -> sqlx::Result<()> {
     let templates = all(db).await?;
@@ -273,8 +272,7 @@ pub async fn sync_server(
     if prepare.is_empty() && stale.is_empty() {
         return Ok(());
     }
-    let d = Daemon::new(server_id, address);
-    let token = keys::admin_token(key, server_id);
+    let d = Daemon::new(server_id);
     for id in prepare {
         let Some(t) = templates.iter().find(|t| t.server_name() == id) else {
             continue;
@@ -283,7 +281,7 @@ pub async fn sync_server(
             tracing::debug!(server = %server_id, template = %id, "Pyo's registry door has no tailnet address yet: next round");
             continue;
         };
-        match d.command(&token, &cmd).await {
+        match d.command(&cmd).await {
             Ok(_) => {
                 tracing::info!(server = %server_id, template = %id, "asked the sandbox server to prepare a template")
             }
@@ -295,7 +293,6 @@ pub async fn sync_server(
     for id in stale {
         match d
             .command(
-                &token,
                 &DaemonCommand::DeleteTemplate {
                     template: id.clone(),
                 },
@@ -328,9 +325,9 @@ pub async fn push(s: AppState, template_id: String) {
         else {
             return anyhow::Ok(());
         };
-        let servers: Vec<(String, Option<String>, String, Value)> = sqlx::query_as(
-            "SELECT id, team_id, address, templates FROM pyo.sandbox_servers
-              WHERE state = 'ready' AND enabled AND address IS NOT NULL
+        let servers: Vec<(String, Option<String>, Value)> = sqlx::query_as(
+            "SELECT id, team_id, templates FROM pyo.sandbox_servers
+              WHERE state = 'ready' AND enabled AND outbound
                 AND capability->>'runtime' IN ('firecracker', 'gvisor')",
         )
         .fetch_all(&s.db)
@@ -342,7 +339,7 @@ pub async fn push(s: AppState, template_id: String) {
         let key = keys::signing_key(&s.db, &s.sealer)
             .await
             .map_err(|e| anyhow::anyhow!(e.message))?;
-        for (id, team, address, reports) in servers {
+        for (id, team, reports) in servers {
             let reports: Vec<TemplateReport> = serde_json::from_value(reports).unwrap_or_default();
             if !eligible(team.as_deref(), &t) || !made_ahead(&t.id, &reports) {
                 continue;
@@ -351,8 +348,7 @@ pub async fn push(s: AppState, template_id: String) {
             let Some(cmd) = prepare_command(&key, &t) else {
                 continue;
             };
-            let token = keys::admin_token(&key, &id);
-            match Daemon::new(&id, &address).command(&token, &cmd).await {
+            match Daemon::new(&id).command(&cmd).await {
                 // Saved at once, so the list shows it building before
                 // the next round.
                 Ok(DaemonResult::Template { template }) => {
@@ -395,8 +391,8 @@ pub async fn save_report(db: &PgPool, server_id: &str, name: &str, r: Option<&Te
 /// Tells the servers that have a deleted template to delete it, every
 /// revision of it. The runner catches the ones that don't answer now.
 pub async fn forget(s: AppState, template_id: String) {
-    let servers: Vec<(String, String, Value)> = match sqlx::query_as(
-        "SELECT id, address, templates FROM pyo.sandbox_servers WHERE address IS NOT NULL",
+    let servers: Vec<(String, Value)> = match sqlx::query_as(
+        "SELECT id, templates FROM pyo.sandbox_servers WHERE outbound",
     )
     .fetch_all(&s.db)
     .await
@@ -407,19 +403,14 @@ pub async fn forget(s: AppState, template_id: String) {
             return;
         }
     };
-    let Ok(key) = keys::signing_key(&s.db, &s.sealer).await else {
-        return;
-    };
-    for (id, address, templates) in servers {
+    for (id, templates) in servers {
         let reports: Vec<TemplateReport> = serde_json::from_value(templates).unwrap_or_default();
-        let token = keys::admin_token(&key, &id);
         for r in reports
             .iter()
             .filter(|r| is_revision_of(&r.name, &template_id))
         {
-            let _ = Daemon::new(&id, &address)
+            let _ = Daemon::new(&id)
                 .command(
-                    &token,
                     &DaemonCommand::DeleteTemplate {
                         template: r.name.clone(),
                     },

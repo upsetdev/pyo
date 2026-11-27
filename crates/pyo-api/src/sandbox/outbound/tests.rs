@@ -199,7 +199,7 @@ fn sandboxes_on_it_open_on_its_tailnet_name() {
         .await
         .unwrap();
         let want = format!("https://sbx-1.{}:7443", t.suffix);
-        let c = crate::sandbox::connection(&s, &id, &t.id, &j.server_id, "100.64.0.9").await.unwrap();
+        let c = crate::sandbox::connection(&s, &id, &t.id, &j.server_id).await.unwrap();
         assert_eq!(c.url, want);
         assert_eq!(c.web_url.as_deref(), Some(want.as_str()));
         let v = crate::sandbox::sandbox_views(&s.db, std::slice::from_ref(&t.id), Some(id.as_str()), false).await.unwrap();
@@ -221,7 +221,7 @@ fn kinds_are_the_commands_types() {
 // ── Against a throwaway Postgres ───────────────────────────────────────────
 
 /// A signer kept here, for sandbox commands only: a sequence per server.
-pub(super) struct Local {
+pub(crate) struct Local {
     key: KeySigner,
     seq: AtomicU64,
     /// Refuse every command of this kind.
@@ -230,7 +230,7 @@ pub(super) struct Local {
 }
 
 impl Local {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Local {
             key: KeySigner::from_pkcs8(&KeySigner::generate_pkcs8().unwrap()).unwrap(),
             seq: AtomicU64::new(0),
@@ -291,15 +291,15 @@ impl crate::CommandSigner for Local {
     }
 }
 
-pub(super) struct Team {
-    pub(super) id: String,
-    pub(super) holder: String,
-    pub(super) suffix: String,
-    pub(super) admin: User,
-    pub(super) developer: User,
+pub(crate) struct Team {
+    pub(crate) id: String,
+    pub(crate) holder: String,
+    pub(crate) suffix: String,
+    pub(crate) admin: User,
+    pub(crate) developer: User,
 }
 
-pub(super) async fn state() -> AppState {
+pub(crate) async fn state() -> AppState {
     let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL")).await.unwrap();
     crate::migrate::run(&db).await.unwrap();
     // Commands are sealed with the team's data key: a key of its own here
@@ -343,7 +343,7 @@ async fn user(db: &PgPool, team: &str, run: &str, role: &str) -> User {
 
 /// A team with Tailscale kept on a connected holder, which lists `sbx-1`.
 /// Without `tailscale`, a team with none.
-pub(super) async fn team(db: &PgPool, tailscale: bool) -> Team {
+pub(crate) async fn team(db: &PgPool, tailscale: bool) -> Team {
     let run = crate::ids::random_string(10).to_lowercase();
     let (id, holder, suffix) = (format!("team_o{run}"), format!("cl_o{run}"), format!("tail{run}.ts.net"));
     sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&id).execute(db).await.unwrap();
@@ -370,7 +370,7 @@ pub(super) async fn team(db: &PgPool, tailscale: bool) -> Team {
 }
 
 /// The holder's agent: answers its Tailscale keys until stopped.
-pub(super) fn holder_agent(db: PgPool, holder: String) -> tokio::task::JoinHandle<()> {
+pub(crate) fn holder_agent(db: PgPool, holder: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let ids: Vec<String> = sqlx::query_scalar(
@@ -398,7 +398,7 @@ pub(super) fn holder_agent(db: PgPool, holder: String) -> tokio::task::JoinHandl
     })
 }
 
-pub(super) async fn code_for(s: &AppState, signer: &Local, t: &Team, name: &str) -> Joining {
+pub(crate) async fn code_for(s: &AppState, signer: &Local, t: &Team, name: &str) -> Joining {
     let agent = holder_agent(s.db.clone(), t.holder.clone());
     let j = create_join_code(
         s,

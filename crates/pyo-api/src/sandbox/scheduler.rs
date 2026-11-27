@@ -32,6 +32,9 @@ pub struct Candidate {
     pub team_id: Option<String>,
     pub enabled: bool,
     pub ready: bool,
+    /// It joined at Pyo's tailnet door before 0.52.0 and takes no commands
+    /// until it's updated (`super::NEEDS_UPDATE`).
+    pub needs_update: bool,
     /// Seconds since its last report.
     pub report_age_secs: i64,
     pub capability: CapabilityReport,
@@ -54,6 +57,9 @@ pub enum NoServer {
     None,
     /// Servers exist but none is up.
     NoneUp,
+    /// Every server the team can use joined the old way and needs an
+    /// update before it takes sandboxes.
+    NeedsUpdate,
     /// None runs Firecracker, and `isolation: vm` needs it.
     NoVm,
     /// None has networking, and the sandbox wants the internet.
@@ -70,6 +76,9 @@ impl NoServer {
             NoServer::None => "Your team has no sandbox server yet. Add one first.".into(),
             NoServer::NoneUp => {
                 "No sandbox server is up right now. Check your sandbox servers.".into()
+            }
+            NoServer::NeedsUpdate => {
+                "Your sandbox servers need an update. Press Update on each one to reconnect it.".into()
             }
             NoServer::NoVm => {
                 "No sandbox server has KVM, so isolation \"vm\" can't run. Use \"auto\".".into()
@@ -91,6 +100,7 @@ impl NoServer {
             NoServer::None | NoServer::NoneUp => {
                 format!("{server} can't take sandboxes right now. Pick another server.")
             }
+            NoServer::NeedsUpdate => super::NEEDS_UPDATE.into(),
             NoServer::NoVm => {
                 format!("{server} has no KVM, so isolation \"vm\" can't run there.")
             }
@@ -144,7 +154,11 @@ fn usable<'a>(
         })
         .collect();
     if up.is_empty() {
-        return Err(NoServer::NoneUp);
+        return Err(if servers.iter().all(|c| c.needs_update) {
+            NoServer::NeedsUpdate
+        } else {
+            NoServer::NoneUp
+        });
     }
     let isolated: Vec<&Candidate> = up
         .into_iter()
@@ -336,6 +350,7 @@ mod tests {
             team_id: None,
             enabled: true,
             ready: true,
+            needs_update: false,
             report_age_secs: 5,
             capability: CapabilityReport {
                 runtime,
@@ -440,6 +455,16 @@ mod tests {
         let all = vec![off, stale, joining, none];
         assert_eq!(pick_id(&all, &spec()), Err(NoServer::NoneUp));
         assert_eq!(pick_id(&[], &spec()), Err(NoServer::None));
+        // Servers that joined the old way say so, alone or named.
+        let mut old = server("old", Runtime::Firecracker, 30);
+        (old.ready, old.needs_update) = (false, true);
+        assert_eq!(pick_id(std::slice::from_ref(&old), &spec()), Err(NoServer::NeedsUpdate));
+        let mut mixed = all.clone();
+        mixed.push(old.clone());
+        assert_eq!(pick_id(&mixed, &spec()), Err(NoServer::NoneUp));
+        let one = [old];
+        let e = place_on(&one, "tm_one", "old", &spec(), "stp_x", false).unwrap_err();
+        assert_eq!(e, (axum::http::StatusCode::CONFLICT, super::super::NEEDS_UPDATE.to_owned()));
         let mut s = all.clone();
         s.push(server("ok", Runtime::Firecracker, 2));
         assert_eq!(pick_id(&s, &spec()).unwrap(), "ok");
@@ -696,6 +721,7 @@ mod tests {
         for n in [
             NoServer::None,
             NoServer::NoneUp,
+            NoServer::NeedsUpdate,
             NoServer::NoVm,
             NoServer::NoNetwork,
             NoServer::NoTemplate("x".into()),

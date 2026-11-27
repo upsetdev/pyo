@@ -497,8 +497,8 @@ async fn result(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// The server's report: its capability, capacity, templates and sandboxes,
-/// kept as the runner keeps a self-hosted server's (runner.rs).
+/// The server's report: its capability, capacity, templates and sandboxes
+/// (runner.rs `apply_in`).
 async fn report(
     State(s): State<AppState>,
     server: SandboxServer,
@@ -508,25 +508,23 @@ async fn report(
         return Err(ApiError::bad_request("This report is for another sandbox server."));
     }
     let mut tx = team_tx(&s, &server).await?;
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT address, state FROM pyo.sandbox_servers WHERE id = $1 AND team_id IS NOT DISTINCT FROM $2 AND outbound AND address IS NOT NULL",
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM pyo.sandbox_servers WHERE id = $1 AND team_id IS NOT DISTINCT FROM $2 AND outbound AND address IS NOT NULL",
     )
     .bind(&server.id)
     .bind(&server.team_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (address, state) = row.ok_or_else(|| ApiError::not_found("Sandbox server"))?;
+    let state = state.ok_or_else(|| ApiError::not_found("Sandbox server"))?;
     let srv = super::super::runner::Server {
         id: server.id.clone(),
-        team_id: server.team_id.clone(),
-        address,
         state,
     };
     super::super::runner::apply_in(&mut tx, &srv, &r).await?;
     tx.commit().await?;
-    // Templates it lacks, and ones Pyo dropped, as the runner does for a
-    // server it calls. Through the channel, so not while this answers.
-    tokio::spawn(sync_templates(s.clone(), server, srv.address, r));
+    // Templates it lacks, and ones Pyo dropped. Through the channel, so
+    // not while this answers.
+    tokio::spawn(sync_templates(s.clone(), server, r));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -537,7 +535,7 @@ static SYNCING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<S
 /// After an outbound server's report: asks it to prepare the templates it
 /// lacks and delete the ones Pyo dropped. One at a time per server: a
 /// report that comes in meanwhile is skipped.
-async fn sync_templates(s: AppState, server: SandboxServer, address: String, r: ServerReport) {
+async fn sync_templates(s: AppState, server: SandboxServer, r: ServerReport) {
     if !SYNCING.lock().unwrap_or_else(|p| p.into_inner()).insert(server.id.clone()) {
         return;
     }
@@ -545,7 +543,7 @@ async fn sync_templates(s: AppState, server: SandboxServer, address: String, r: 
         let key = crate::sandbox::keys::signing_key(&s.db, &s.sealer)
             .await
             .map_err(|e| anyhow::anyhow!(e.message))?;
-        crate::sandbox::templates::sync_server(&s.db, &key, &server.id, server.team_id.as_deref(), &address, &r).await?;
+        crate::sandbox::templates::sync_server(&s.db, &key, &server.id, server.team_id.as_deref(), &r).await?;
         anyhow::Ok(())
     }
     .await;
