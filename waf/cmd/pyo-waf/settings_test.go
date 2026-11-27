@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -43,7 +44,10 @@ func TestFollowsTheConfigMap(t *testing.T) {
 	s.cur.Store(empty())
 	r := &reloader{s: s}
 	k := &kubeAPI{base: srv.URL, namespace: "pyo-waf", name: "pyo-waf", token: func() string { return "tok" }, client: srv.Client()}
-	go k.follow(r)
+	// Stopped before the server closes, which waits for its open watch.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go k.follow(ctx, r)
 	wait := func(host string) {
 		t.Helper()
 		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {

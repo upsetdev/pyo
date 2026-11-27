@@ -25,6 +25,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -692,7 +693,7 @@ func main() {
 	// read (the kubelet refreshes it only every minute or so).
 	if *configMap != "" {
 		if api, err := inCluster(*configMap); err == nil {
-			go api.follow(r)
+			go api.follow(context.Background(), r)
 		} else {
 			slog.Warn("settings only from the file", "error", err)
 		}

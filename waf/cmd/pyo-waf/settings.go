@@ -231,13 +231,16 @@ func (k *kubeAPI) watch(ctx context.Context, r *reloader, rv string) (string, er
 
 var errGone = errors.New("watch expired")
 
-// follow keeps the settings in step with the ConfigMap, for good.
-func (k *kubeAPI) follow(r *reloader) {
-	ctx := context.Background()
+// follow keeps the settings in step with the ConfigMap until ctx ends
+// (for good, in the processor).
+func (k *kubeAPI) follow(ctx context.Context, r *reloader) {
 	backoff := time.Second
 	warned := false
-	for {
+	for ctx.Err() == nil {
 		rv, err := k.list(ctx, r)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			r.fromAPI.Store(false)
 			if !warned {
@@ -256,6 +259,9 @@ func (k *kubeAPI) follow(r *reloader) {
 		backoff = time.Second
 		for {
 			rv, err = k.watch(ctx, r, rv)
+			if ctx.Err() != nil {
+				return
+			}
 			if err != nil {
 				if !errors.Is(err, errGone) {
 					slog.Warn("settings watch ended", "error", err)
