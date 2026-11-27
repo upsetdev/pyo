@@ -34,8 +34,9 @@ pub const ENVOY_GATEWAY_VERSION: &str = "v1.9.3";
 /// and the proxies' shutdown manager) and Envoy's, for
 /// [`ENVOY_GATEWAY_VERSION`]: Pyo's mirrors of envoyproxy's on Docker Hub
 /// (deploy/mirrors.txt), never Docker Hub itself. The controller's is in
-/// [`ENVOY_GATEWAY_VALUES`] too. A chart is pulled by tag: Helm takes no
-/// digest.
+/// [`ENVOY_GATEWAY_VALUES`] too. The proxies' settings set Envoy's and the
+/// shutdown manager's ([`envoy_proxy`]). A chart is pulled by tag: Helm
+/// takes no digest.
 pub const ENVOY_GATEWAY_CHART: &str = "oci://ghcr.io/upsetdev/pyo-mirror/envoyproxy/gateway-helm";
 pub const ENVOY_GATEWAY_IMAGE: &str = "ghcr.io/upsetdev/pyo-mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f";
 pub const ENVOY_IMAGE: &str = "ghcr.io/upsetdev/pyo-mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:9d84a586119a27b50437dbb01eccd4722832741539b1ed53c8e9d6da6067a6e0";
@@ -645,6 +646,9 @@ pub fn waf_config(routes: &[WafRoute]) -> Value {
 /// (k3s before 1.37), before this chart: pyo-api's
 /// `/install/gateway-crds.yaml`. Envoy Gateway only watches kinds whose CRDs
 /// exist when it starts.
+///
+/// The shutdown manager's image in the controller's settings is
+/// [`CHART_SHUTDOWN_MANAGER_IMAGE`], not the controller's own: see there.
 pub const ENVOY_GATEWAY_VALUES: &str = r#"crds:
   enabled: false
 global:
@@ -661,6 +665,8 @@ config:
         watch:
           type: Namespaces
           namespaces: [pyo-gateway]
+        shutdownManager:
+          image: docker.io/envoyproxy/gateway:v1.9.3
     extensionApis:
       enableBackend: true
     logging:
@@ -674,6 +680,19 @@ deployment:
       limits: { memory: 512Mi }
       requests: { cpu: 50m, memory: 64Mi }
 "#;
+
+/// The shutdown manager's image in Envoy Gateway's own settings: what its
+/// chart gave by default up to Pyo 0.51.0, which set no images. Never
+/// pulled: the proxies' settings set the image ([`envoy_proxy`]), and
+/// those override it.
+///
+/// It stays the same so that a chart upgrade alone renders the proxies of
+/// an older EnvoyProxy exactly as before. Then an update restarts the
+/// proxies once, whether the new chart or the new agent's EnvoyProxy lands
+/// first (connect.sh applies both at once, and the agent writes its
+/// EnvoyProxy when it starts). Were it the controller's image, the chart
+/// would restart them a second time.
+pub const CHART_SHUTDOWN_MANAGER_IMAGE: &str = "docker.io/envoyproxy/gateway:v1.9.3";
 
 /// The HelmChart that installs Envoy Gateway in `pyo-gateway`.
 pub fn envoy_gateway_chart() -> Value {
@@ -734,9 +753,15 @@ pub fn envoy_proxy(geoip_image: &str, public: bool) -> Value {
                         },
                         // No cluster credentials in the pods that face the internet.
                         // Envoy Gateway's shutdown manager asks for 32 MiB and holds a few.
+                        // Its image is set here, not by the controller's settings
+                        // ([`CHART_SHUTDOWN_MANAGER_IMAGE`]): only this changes the pods.
                         "patch": { "type": "StrategicMerge", "value": { "spec": { "template": { "spec": {
                             "automountServiceAccountToken": false,
-                            "containers": [{ "name": "shutdown-manager", "resources": { "requests": { "cpu": "10m", "memory": "16Mi" } } }],
+                            "containers": [{
+                                "name": "shutdown-manager",
+                                "image": ENVOY_GATEWAY_IMAGE,
+                                "resources": { "requests": { "cpu": "10m", "memory": "16Mi" } },
+                            }],
                         } } } } },
                     },
                     "envoyService": envoy_service(public),
@@ -2010,7 +2035,127 @@ mod tests {
                 proxy["spec"]["provider"]["kubernetes"]["envoyDaemonSet"]["container"]["image"],
                 super::ENVOY_IMAGE
             );
+            assert_eq!(
+                shutdown_manager_patch(&proxy["spec"])["image"],
+                super::ENVOY_GATEWAY_IMAGE
+            );
         }
+    }
+
+    /// The shutdown manager's entry in the proxies' pod patch.
+    fn shutdown_manager_patch(spec: &serde_json::Value) -> serde_json::Value {
+        let containers = spec["provider"]["kubernetes"]["envoyDaemonSet"]["patch"]["value"]["spec"]
+            ["template"]["spec"]["containers"]
+            .as_array()
+            .expect("the patch lists containers");
+        containers
+            .iter()
+            .find(|c| c["name"] == "shutdown-manager")
+            .cloned()
+            .expect("the patch sets the shutdown manager")
+    }
+
+    /// The controller's settings, as the chart renders them: what the
+    /// values set, else the chart's own (Envoy Gateway v1.9.3's
+    /// `eg.default-envoy-gateway-config`: the shutdown manager runs the
+    /// controller's image, `docker.io/envoyproxy/gateway:<version>` when the
+    /// values name none).
+    fn chart_shutdown_manager(values: &serde_json::Value) -> String {
+        let set = &values["config"]["envoyGateway"]["provider"]["kubernetes"]["shutdownManager"]["image"];
+        if let Some(image) = set.as_str() {
+            return image.to_owned();
+        }
+        match values["global"]["images"]["envoyGateway"]["image"].as_str() {
+            Some(image) => image.to_owned(),
+            None => format!("docker.io/envoyproxy/gateway:{}", super::ENVOY_GATEWAY_VERSION),
+        }
+    }
+
+    /// The images of the proxies' pods, as Envoy Gateway renders them from
+    /// an EnvoyProxy and its own settings: the EnvoyProxy's when it sets
+    /// them, else Envoy Gateway's defaults.
+    fn rendered_images(spec: &serde_json::Value, chart: &serde_json::Value) -> (String, String) {
+        let ds = &spec["provider"]["kubernetes"]["envoyDaemonSet"];
+        let envoy = ds["container"]["image"]
+            .as_str()
+            .unwrap_or("docker.io/envoyproxy/envoy:distroless-v1.39.5")
+            .to_owned();
+        let containers = ds["patch"]["value"]["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let shutdown = containers
+            .iter()
+            .find(|c| c["name"] == "shutdown-manager")
+            .and_then(|c| c["image"].as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| chart_shutdown_manager(chart));
+        (envoy, shutdown)
+    }
+
+    /// An update from 0.51.0 restarts the proxies once, whichever lands
+    /// first: the new chart (connect.sh) or the new agent's EnvoyProxy.
+    /// 0.51.0's EnvoyProxy set no image, and its chart's values none either.
+    #[test]
+    fn an_update_restarts_the_proxies_once_whatever_lands_first() {
+        let values = |text: &str| -> serde_json::Value { serde_norway::from_str(text).unwrap() };
+        let new_chart = values(super::envoy_gateway_chart()["spec"]["valuesContent"].as_str().unwrap());
+        let mut old_chart = new_chart.clone();
+        old_chart.as_object_mut().unwrap().remove("global");
+        old_chart["config"]["envoyGateway"]["provider"]["kubernetes"]
+            .as_object_mut()
+            .unwrap()
+            .remove("shutdownManager");
+        for public in [true, false] {
+            let new_proxy = super::envoy_proxy("g", public)["spec"].clone();
+            let mut old_proxy = new_proxy.clone();
+            let ds = &mut old_proxy["provider"]["kubernetes"]["envoyDaemonSet"];
+            ds["container"].as_object_mut().unwrap().remove("image");
+            ds["patch"]["value"]["spec"]["template"]["spec"]["containers"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("image");
+
+            let before = rendered_images(&old_proxy, &old_chart);
+            assert_eq!(
+                before,
+                (
+                    "docker.io/envoyproxy/envoy:distroless-v1.39.5".to_owned(),
+                    "docker.io/envoyproxy/gateway:v1.9.3".to_owned()
+                )
+            );
+            let after = rendered_images(&new_proxy, &new_chart);
+            assert_eq!(after, (super::ENVOY_IMAGE.to_owned(), super::ENVOY_GATEWAY_IMAGE.to_owned()));
+            // The chart first: nothing changes until the EnvoyProxy does.
+            assert_eq!(rendered_images(&old_proxy, &new_chart), before);
+            // The EnvoyProxy first: the chart changes nothing after it.
+            assert_eq!(rendered_images(&new_proxy, &old_chart), after);
+        }
+    }
+
+    /// The controller's settings name the shutdown manager's image that
+    /// 0.51.0's chart gave by default, so a chart upgrade alone restarts no
+    /// proxy. The image the proxies run comes from their settings.
+    #[test]
+    fn the_chart_keeps_the_shutdown_manager_setting_of_0_51_0() {
+        let chart = super::envoy_gateway_chart();
+        let values: serde_json::Value =
+            serde_norway::from_str(chart["spec"]["valuesContent"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            values["config"]["envoyGateway"]["provider"]["kubernetes"]["shutdownManager"]["image"],
+            super::CHART_SHUTDOWN_MANAGER_IMAGE
+        );
+        assert_eq!(super::CHART_SHUTDOWN_MANAGER_IMAGE, "docker.io/envoyproxy/gateway:v1.9.3");
+        // The values set nothing else there that reaches the proxies.
+        assert_eq!(
+            values["config"]["envoyGateway"]["provider"]["kubernetes"]["shutdownManager"]
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(values["config"]["envoyGateway"].get("envoyProxy").is_none());
+        assert!(values["global"]["images"].get("envoyProxy").is_none());
     }
 
     /// A Certificate owns its Secret, so deleting one (a service's domain,

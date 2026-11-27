@@ -864,7 +864,7 @@ which is why this is a monthly job.
 
 `crates/pyo-proto/testdata/inbound-pods.json` records the settings of the
 pods every request passes through: the proxies (the EnvoyProxy settings,
-Envoy Gateway's version and image), the WAF's pod template, the Cloudflare
+Envoy Gateway's version, image and shutdown manager setting), the WAF's pod template, the Cloudflare
 Tunnel connector's pod template, and the `geoip` and `waf` tags. The test
 `inbound_pods` in `crates/pyo-proto/tests/` fails when the code gives
 anything else, and lists what changed and which pods restart.
@@ -884,6 +884,21 @@ For the release, write a `beforeYouUpdate` notice when the file changed
 since the last tag. For the proxies: "Pyo Gateway restarts once on each
 server. Open WebSockets reconnect." Requests are not dropped: a server's
 new proxy is ready before its old one stops.
+
+Two parts write the proxies' pods: the agent's EnvoyProxy and Envoy
+Gateway's controller, which the connect command upgrades. Either can land
+first. So that an update restarts the proxies once, every image of their
+pods is set in the EnvoyProxy (`envoy_proxy` in
+`crates/pyo-proto/src/system.rs`): Envoy's and the shutdown manager's.
+The controller's own shutdown manager setting
+(`CHART_SHUTDOWN_MANAGER_IMAGE`) stays what 0.51.0 had. Don't move it to
+the controller's image: a chart upgrade would then restart the proxies a
+second time on clusters still on an older EnvoyProxy.
+
+A new Envoy Gateway version changes both parts, and its controller can
+render the pods differently. Such an update can restart the proxies
+twice. Check it with `scripts/update-traffic-e2e.sh update` and say so in
+the notice.
 
 ## Third-party images
 
