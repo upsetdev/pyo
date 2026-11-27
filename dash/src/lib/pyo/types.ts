@@ -587,6 +587,8 @@ export type ClusterTunnel = {
   health: TunnelHealth;
   /** The cluster's install refused a tunnel object: run the connect command again. */
   refused: boolean;
+  /** Rotate was asked for, until the old token's connectors are cut. */
+  rotating?: boolean;
   certificate: { id: ID; notAfter: Timestamp } | null;
   checkedAt: Timestamp | null;
 };

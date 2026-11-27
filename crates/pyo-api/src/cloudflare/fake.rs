@@ -130,6 +130,29 @@ impl FakeCf {
         self.state.lock().unwrap().records.push((zone.into(), r));
     }
 
+    /// Set a tunnel's connectors by their ids (UUIDs), two connections each.
+    pub fn set_connectors(&self, tunnel: &str, clients: &[&str]) {
+        for (_, t) in self.state.lock().unwrap().tunnels.iter_mut() {
+            if t["id"] == tunnel {
+                t["status"] = json!(if clients.is_empty() { "inactive" } else { "healthy" });
+                t["connections"] = json!(clients.iter().flat_map(|c| ["FRA", "AMS"].map(|colo| json!({ "colo_name": colo, "client_id": c, "client_version": "2026.10.7", "opened_at": "2026-11-22T00:00:00Z", "origin_ip": "203.0.113.7" }))).collect::<Vec<_>>());
+            }
+        }
+    }
+
+    /// The ids of a tunnel's connectors, as Cloudflare lists them now.
+    pub fn connected(&self, tunnel: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .tunnels()
+            .iter()
+            .filter(|t| t["id"] == tunnel)
+            .flat_map(|t| t["connections"].as_array().cloned().unwrap_or_default())
+            .filter_map(|c| c["client_id"].as_str().map(str::to_owned))
+            .collect();
+        out.dedup();
+        out
+    }
+
     /// Set a tunnel's status, as its connectors make it.
     pub fn set_status(&self, tunnel: &str, status: &str, colos: &[&str]) {
         for (_, t) in self.state.lock().unwrap().tunnels.iter_mut() {
@@ -277,8 +300,28 @@ async fn handle(
                     ok(c.map_or(json!({ "version": 0, "config": null }), |c| json!({ "version": c.1, "config": c.2 })))
                 }
                 ("DELETE", ["connections"]) => {
-                    a.tunnels[i].1["connections"] = json!([]);
-                    a.tunnels[i].1["status"] = json!("inactive");
+                    // One connector (client_id), or every one without it.
+                    let client = query(&uri, "client_id");
+                    if let Some(c) = &client
+                        && let Some(last) = a.calls.last_mut()
+                    {
+                        last.push_str(&format!("?client_id={c}"));
+                    }
+                    let t = &mut a.tunnels[i].1;
+                    let left: Vec<Value> = match &client {
+                        Some(c) => t["connections"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|x| x["client_id"] != json!(c))
+                            .cloned()
+                            .collect(),
+                        None => vec![],
+                    };
+                    if left.is_empty() {
+                        t["status"] = json!("inactive");
+                    }
+                    t["connections"] = json!(left);
                     ok(json!(null))
                 }
                 _ => err(StatusCode::NOT_FOUND, "No route"),

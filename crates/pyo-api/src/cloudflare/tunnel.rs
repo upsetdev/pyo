@@ -144,6 +144,8 @@ pub(crate) trait TunnelApi {
     async fn rotate_secret(&self, account: &str, id: &str, secret: &str) -> Result<(), CfError>;
     /// Drop the tunnel's connections (they come back with a current token).
     async fn drop_connections(&self, account: &str, id: &str) -> Result<(), CfError>;
+    /// Drop one connector's connections (`client_id`), the others stay.
+    async fn drop_connector(&self, account: &str, id: &str, client_id: &str) -> Result<(), CfError>;
     /// The zone's Origin CA certificates (proves the token may read them).
     async fn origin_certs(&self, zone_id: &str) -> Result<Vec<String>, CfError>;
     /// Issue an Origin CA certificate for a CSR.
@@ -345,6 +347,16 @@ impl TunnelApi for Http {
 
     async fn drop_connections(&self, account: &str, id: &str) -> Result<(), CfError> {
         let url = self.url(&tunnel_path(account, Some(id), "/connections")?);
+        self.call(Method::DELETE, url, None).await.map(|_| ())
+    }
+
+    async fn drop_connector(&self, account: &str, id: &str, client_id: &str) -> Result<(), CfError> {
+        // Without a client_id Cloudflare drops every connector: never that here.
+        if !uuid_ok(client_id) {
+            return Err(CfError::NotFound);
+        }
+        let mut url = self.url(&tunnel_path(account, Some(id), "/connections")?);
+        url.query_pairs_mut().append_pair("client_id", client_id);
         self.call(Method::DELETE, url, None).await.map(|_| ())
     }
 

@@ -534,16 +534,20 @@ tunnel_setup() {
   note "Both answer through Cloudflare's edge ($EDGE) and the tunnel. The WAF blocks a test attack there too."
 }
 
-# Rotate: a new token for the connector, its old connections dropped.
+# Rotate: a new token for the connector. Pyo cuts what's left of the old
+# token's connectors once the new ones are connected, so the step ends
+# when Pyo says the rotation is over (`rotating`), not at the rollout.
 connector_token() { kc -n pyo-system get deployment pyo-tunnel -o jsonpath='{.spec.template.metadata.annotations.pyo\.dev/token-hash}'; }
 token_moved() { [ "$(connector_token)" != "$1" ]; }
+rotation_over() { tunnel_api | jq -e '.tunnel.rotating != true' >/dev/null; }
 rotate_token() {
   local before out
   before=$(connector_token)
   out=$(op "$(jq -n --arg c "$CLUSTER" '{op: "rotateTunnelToken", clusterId: $c}')") || { note "Pyo refused: $(masked "$out")"; return 1; }
   wait_for 180 "the connector has the new token" token_moved "$before" || return 1
   kc -n pyo-system rollout status deployment/pyo-tunnel --timeout=300s >/dev/null || return 1
-  wait_for 240 "the old connectors are gone" no_stopping pyo-system
+  wait_for 240 "the old connectors are gone" no_stopping pyo-system || return 1
+  wait_for 420 "Pyo says the rotation is over" rotation_over
 }
 
 # Pyo's own remove actions first, then Cloudflare's API for what's left

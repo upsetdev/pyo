@@ -356,3 +356,131 @@ fn free_names_get_their_own_route_and_no_wildcard() {
         .collect();
     assert_eq!(names, ["web-shop.example.com", "blog.example.com"]);
 }
+
+// ── Rotating ───────────────────────────────────────────────────────────────
+
+/// A tunnel whose connectors Cloudflare lists, two connections each.
+fn listing(clients: &[&str]) -> tunnel::Tunnel {
+    tunnel::Tunnel {
+        id: "00000000-0000-4000-8000-000000000001".into(),
+        connections: clients
+            .iter()
+            .flat_map(|c| [*c, *c])
+            .map(|c| tunnel::Connection {
+                client_id: c.into(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// The agent's report at `at` (ms): `pods` connector pods, `ready` of them ready.
+fn report(at: i64, pods: usize, ready: usize) -> Value {
+    let list: Vec<Value> = (0..pods)
+        .map(|i| json!({ "server": "server-1", "ready": i < ready }))
+        .collect();
+    json!({ "tunnelId": "t", "replicas": 2, "readyReplicas": ready.min(2), "pods": list, "at": at })
+}
+
+fn rotation(old: &[&str]) -> Rotation {
+    Rotation {
+        tunnel_id: "00000000-0000-4000-8000-000000000001".into(),
+        old: old.iter().map(|c| c.to_string()).collect(),
+        at: 1_000_000,
+        connected_at: None,
+    }
+}
+
+#[test]
+fn the_old_connectors_stay_until_the_new_ones_are_connected() {
+    let r = rotation(&["old-a", "old-b"]);
+    let t0 = r.at;
+    // Just rotated: the new pods aren't up. Nothing is cut.
+    let next = rotation_next(&r, &listing(&["old-a", "old-b"]), &report(t0, 3, 2), t0 + 5_000);
+    assert_eq!(next, RotationNext::Wait(r.clone()));
+    // One new connector of the two the agent runs: still waiting.
+    let next = rotation_next(&r, &listing(&["old-a", "old-b", "new-a"]), &report(t0 + 9_000, 3, 2), t0 + 10_000);
+    assert_eq!(next, RotationNext::Wait(r.clone()));
+    // Both new ones connected: noted, but the report is from before that,
+    // when an old pod may still have been serving.
+    let RotationNext::Wait(seen) =
+        rotation_next(&r, &listing(&["old-b", "new-a", "new-b"]), &report(t0 + 19_000, 2, 2), t0 + 20_000)
+    else {
+        panic!("cut on a report from before the new connectors")
+    };
+    assert_eq!(seen.connected_at, Some(t0 + 20_000));
+    // A later report with an old pod still stopping: waiting.
+    let next = rotation_next(&seen, &listing(&["old-b", "new-a", "new-b"]), &report(t0 + 25_000, 3, 2), t0 + 30_000);
+    assert!(matches!(next, RotationNext::Wait(_)), "{next:?}");
+    // A later report with only the two new pods, both ready: what's left
+    // of the old connectors is cut, only that.
+    let next = rotation_next(&seen, &listing(&["old-b", "new-a", "new-b"]), &report(t0 + 35_000, 2, 2), t0 + 40_000);
+    assert_eq!(next, RotationNext::Cut(vec!["old-b".into()]));
+}
+
+#[test]
+fn old_connectors_that_left_by_themselves_end_the_rotation() {
+    let r = rotation(&["old-a", "old-b"]);
+    let next = rotation_next(&r, &listing(&["new-a", "new-b"]), &report(r.at, 2, 2), r.at + 60_000);
+    assert_eq!(next, RotationNext::Cut(vec![]));
+    // A tunnel with no connector when it rotated: nothing to wait for.
+    let empty = rotation(&[]);
+    assert_eq!(rotation_next(&empty, &listing(&[]), &json!({}), empty.at), RotationNext::Cut(vec![]));
+}
+
+#[test]
+fn the_old_connectors_are_cut_after_the_wait_whatever_runs() {
+    let r = rotation(&["old-a", "old-b"]);
+    let listed = listing(&["old-a", "old-b"]);
+    let just_before = r.at + ROTATE_CUT_SECS * 1000 - 1;
+    assert!(matches!(rotation_next(&r, &listed, &json!({}), just_before), RotationNext::Wait(_)));
+    let after = r.at + ROTATE_CUT_SECS * 1000;
+    assert_eq!(
+        rotation_next(&r, &listed, &json!({}), after),
+        RotationNext::Cut(vec!["old-a".into(), "old-b".into()])
+    );
+}
+
+#[test]
+fn ready_pods_without_new_connectors_cut_nothing() {
+    // The agent shows two ready pods, but Cloudflare lists no new
+    // connector (they lost their connections): the old ones are all
+    // that serves.
+    let mut r = rotation(&["old-a", "old-b"]);
+    r.connected_at = Some(r.at + 10_000);
+    let next = rotation_next(&r, &listing(&["old-a", "new-a"]), &report(r.at + 30_000, 2, 2), r.at + 40_000);
+    assert!(matches!(next, RotationNext::Wait(_)), "{next:?}");
+    // No report from the agent at all: only the wait ends it.
+    let next = rotation_next(&r, &listing(&["old-a", "new-a", "new-b"]), &json!({}), r.at + 40_000);
+    assert!(matches!(next, RotationNext::Wait(_)), "{next:?}");
+}
+
+#[test]
+fn a_rotation_is_kept_as_json_and_read_back() {
+    let mut r = rotation(&["old-a"]);
+    r.connected_at = Some(5);
+    let v = json!(r);
+    assert_eq!(v, json!({ "tunnelId": r.tunnel_id, "old": ["old-a"], "at": 1_000_000, "connectedAt": 5 }));
+    let row = Row { rotation: Some(v), ..row() };
+    assert_eq!(pending_rotation(&row), Some(r));
+    assert_eq!(pending_rotation(&Row { rotation: Some(json!("nonsense")), ..row }), None);
+}
+
+#[test]
+fn a_rotation_shows_until_it_is_over() {
+    let r = json!({ "state": "ready", "error": null, "cfStatus": {}, "agentStatus": {}, "rotating": true });
+    assert_eq!(shown(&r)["rotating"], true);
+    let r = json!({ "state": "ready", "error": null, "cfStatus": {}, "agentStatus": {} });
+    assert_eq!(shown(&r)["rotating"], false);
+}
+
+#[tokio::test]
+async fn one_connector_is_cut_and_the_others_stay() {
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)]);
+    let (t, _) = ensure_tunnel(&cf, &row(), "abc123").await.unwrap();
+    cf.connectors(&t.id, &["old-a", "new-a", "new-b"]);
+    cf.drop_connector("acct1", &t.id, "old-a").await.unwrap();
+    assert_eq!(cf.connected(&t.id), ["new-a", "new-b"]);
+    assert!(!cf.calls().iter().any(|c| c.starts_with("drop connections")));
+}

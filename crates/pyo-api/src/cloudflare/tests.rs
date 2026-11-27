@@ -145,6 +145,39 @@ impl Fake {
         }
     }
 
+    /// Set a tunnel's connectors by their ids, two connections each, as
+    /// Cloudflare lists them.
+    pub fn connectors(&self, id: &str, clients: &[&str]) {
+        for (_, t) in self.tunnels.lock().unwrap().iter_mut() {
+            if t.id == id {
+                t.status = if clients.is_empty() { "inactive" } else { "healthy" }.into();
+                t.connections = clients
+                    .iter()
+                    .flat_map(|c| [(c, "FRA"), (c, "AMS")])
+                    .map(|(c, colo)| Connection {
+                        client_id: (*c).into(),
+                        colo: colo.into(),
+                        client_version: "2026.10.7".into(),
+                        opened_at: "2026-11-22T00:00:00Z".into(),
+                        origin_ip: "203.0.113.7".into(),
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    /// The ids of a tunnel's connectors, as Cloudflare lists them now.
+    pub fn connected(&self, id: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .tunnel_list()
+            .iter()
+            .filter(|t| t.id == id)
+            .flat_map(|t| t.connections.iter().map(|c| c.client_id.clone()))
+            .collect();
+        out.dedup();
+        out
+    }
+
     pub fn dns(&self, zone: &str) -> Dns {
         self.zones
             .iter()
@@ -925,6 +958,20 @@ impl tunnel::TunnelApi for Fake {
         self.log(format!("drop connections {id}"));
         self.tunnel(account, id).await?;
         self.connect(id, "inactive", &[]);
+        Ok(())
+    }
+
+    async fn drop_connector(&self, account: &str, id: &str, client_id: &str) -> Result<(), CfError> {
+        self.log(format!("drop connector {id} {client_id}"));
+        self.tunnel(account, id).await?;
+        for (_, t) in self.tunnels.lock().unwrap().iter_mut() {
+            if t.id == id {
+                t.connections.retain(|c| c.client_id != client_id);
+                if t.connections.is_empty() {
+                    t.status = "inactive".into();
+                }
+            }
+        }
         Ok(())
     }
 
