@@ -270,6 +270,13 @@ fn the_tunnel_loop_end_to_end() {
         let (status, via, previous) = record(db.clone(), svc.clone()).await.unwrap();
         assert_eq!((status.as_str(), via.as_str()), ("created", "tunnel"));
         assert_eq!(previous[0]["content"], "198.51.100.9");
+        // Both paths until resolvers have the new record: the replaced one
+        // was DNS-only with a TTL of 300.
+        assert_eq!(domain(&db, &svc).await["tunnel"], "switching");
+        tunnel_loop::pass(&s).await.unwrap();
+        assert_eq!(domain(&db, &svc).await["tunnel"], "switching", "not before its grace period");
+        q("UPDATE pyo.dns_records SET updated_at = now() - interval '331 seconds' WHERE service_id = $1").bind(&svc).execute(&db).await.unwrap();
+        tunnel_loop::pass(&s).await.unwrap();
         assert_eq!(domain(&db, &svc).await["tunnel"], "on");
         let now = cf.records(ZONE);
         assert_eq!(now.len(), 1);
@@ -917,6 +924,12 @@ fn the_traffic_paths_end_to_end() {
         tunnel_loop::pass(&s).await.unwrap();
         assert_eq!(traffic(db.clone(), cluster.clone()).await.0, "public", "still moving");
         agent_done(db.clone(), cluster.clone()).await;
+        tunnel_loop::pass(&s).await.unwrap();
+        // Its record moved: both paths, and the ports open, until
+        // Cloudflare's edge has it.
+        assert_eq!(domain(&db, &svc).await["tunnel"], "switching");
+        assert_eq!(traffic(db.clone(), cluster.clone()).await.0, "public", "the ports wait for the edge");
+        q("UPDATE pyo.dns_records SET updated_at = now() - interval '91 seconds' WHERE service_id = $1").bind(&svc).execute(&db).await.unwrap();
         tunnel_loop::pass(&s).await.unwrap();
         assert_eq!(domain(&db, &svc).await["tunnel"], "on");
         let (t, _, closing, _) = traffic(db.clone(), cluster.clone()).await;

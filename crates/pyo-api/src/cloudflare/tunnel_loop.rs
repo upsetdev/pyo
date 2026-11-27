@@ -425,6 +425,7 @@ async fn keep<C: Cloudflare + TunnelApi>(
     // Public ports that wait for domains to move close once they have, and
     // a tunnel turned off goes once its domains are back
     // (traffic_paths.rs).
+    promote(s, row).await?;
     close_public(s, row).await?;
     remove_when_back(s, row).await?;
 
@@ -818,13 +819,10 @@ async fn switch_one<C: Cloudflare + TunnelApi>(
             .bind(json!(kept))
             .execute(&mut *tx)
             .await?;
-            // Only through the tunnel now: the gate goes on, plain HTTP goes.
-            set_domain(&mut tx, &w.service_id, &w.domain_id, |d| {
-                d["tunnel"] = json!(pyo_proto::TUNNEL_ON);
-                live(d);
-            })
-            .await?;
-            let wake = crate::routes::changed(&mut tx, &w.service_id, true).await?;
+            // Its record points at the tunnel now. Both paths stay open
+            // until Cloudflare's edge and resolvers have it ([`promote`]):
+            // only then does the gate go on and plain HTTP go.
+            set_domain(&mut tx, &w.service_id, &w.domain_id, live).await?;
             let replaced: Vec<String> = previous
                 .iter()
                 .map(|k| format!("{} {}", k.kind, k.content))
@@ -849,13 +847,72 @@ async fn switch_one<C: Cloudflare + TunnelApi>(
             )
             .await?;
             tx.commit().await?;
-            if let Some(c) = wake {
-                s.wake(&c).await;
-            }
             return Ok(());
         }
     }
     tx.commit().await?;
+    Ok(())
+}
+
+/// How long a domain whose record moved to the tunnel keeps both paths
+/// before it goes only through the tunnel, in seconds. Cloudflare's edge
+/// serves a new proxied record within about half a minute (measured: up to
+/// 35 seconds), so 90 at least. A DNS-only record it replaced stays in
+/// resolvers for its TTL (1 is Cloudflare's "auto", 300), so that plus 30.
+pub(crate) fn grace_secs(previous: &[Kept]) -> i64 {
+    previous
+        .iter()
+        .filter(|k| !k.proxied && matches!(k.kind.as_str(), "A" | "AAAA" | "CNAME"))
+        .map(|k| i64::from(if k.ttl <= 1 { 300 } else { k.ttl }) + 30)
+        .max()
+        .unwrap_or(0)
+        .max(90)
+}
+
+/// Domains whose record has been on the tunnel for their grace period
+/// ([`grace_secs`]) go only through the tunnel: `tunnel: "on"`, so the
+/// gate closes the direct path and public ports waiting for them may
+/// close (`close_public`). Until then both paths answer.
+async fn promote(s: &AppState, row: &Row) -> ApiResult<()> {
+    let due: Vec<(String, String, String, Value, i64)> = sqlx::query_as(
+        "SELECT r.service_id, r.domain_id, r.hostname, r.previous, extract(epoch FROM now() - r.updated_at)::bigint
+           FROM pyo.dns_records r JOIN pyo.services a ON a.id = r.service_id
+          WHERE a.cluster_id = $1 AND NOT a.deleting AND r.via = 'tunnel' AND r.status = 'created'
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
+                         WHERE d->>'id' = r.domain_id AND d->>'tunnel' = 'switching')",
+    )
+    .bind(&row.cluster_id)
+    .fetch_all(&s.db)
+    .await?;
+    for (service_id, domain_id, host, previous, age) in due {
+        let kept: Vec<Kept> = serde_json::from_value(previous).unwrap_or_default();
+        if age < grace_secs(&kept) {
+            continue;
+        }
+        let mut tx = s.db.begin().await?;
+        set_domain(&mut tx, &service_id, &domain_id, |d| {
+            if d["tunnel"] == json!(pyo_proto::TUNNEL_SWITCHING) {
+                d["tunnel"] = json!(pyo_proto::TUNNEL_ON);
+            }
+        })
+        .await?;
+        let wake = crate::routes::changed(&mut tx, &service_id, true).await?;
+        log_activity(
+            &mut tx,
+            &row.team_id,
+            "Pyo",
+            "domain.tunnel",
+            "info",
+            &format!("{host} goes only through the Cloudflare Tunnel"),
+            json!({ "kind": "service", "id": service_id, "label": host }),
+            json!({ "serviceId": service_id }),
+        )
+        .await?;
+        tx.commit().await?;
+        if let Some(c) = wake {
+            s.wake(&c).await;
+        }
+    }
     Ok(())
 }
 
