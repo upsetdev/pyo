@@ -209,11 +209,13 @@ impl Cleaner<'_> {
             .map(|r| r.name)
             .filter(|n| !n.is_empty() && *n != "UNKNOWN")
             .unwrap_or(if ua.starts_with("curl/") { "curl" } else { "Other" });
-        // A page view: a GET answered with HTML (a 304 has no body, so a path without an extension).
+        // A page view: a GET answered with an HTML page (a 304 has no body,
+        // so a path without an extension). A redirect isn't one: its HTML is
+        // only a link to where the page is.
         let ctype = l.content_type.as_str();
-        let html = ctype.starts_with("text/html")
-            || (status == 304 && ctype.is_empty() && !path.rsplit('/').next().unwrap_or("").contains('.'));
-        let pageview = method == "GET" && (200..400).contains(&status) && html && !crawler;
+        let html = ((200..300).contains(&status) && ctype.starts_with("text/html"))
+            || (status == 304 && (ctype.is_empty() || ctype.starts_with("text/html")) && !path.rsplit('/').next().unwrap_or("").contains('.'));
+        let pageview = method == "GET" && html && !crawler;
         let referrer = Some(l.referer.as_str())
             .filter(|r| !r.is_empty())
             .and_then(|r| r.split("://").nth(1))
@@ -337,6 +339,30 @@ mod tests {
             "details": "rbac_access_denied_matched_policy[DENY]" });
         let Some(Cleaned::Request { row, pageview, .. }) = c.clean(&line, 5) else { panic!() };
         assert_eq!((row.blocked_by.as_str(), row.at, pageview), ("no-de", 5, false));
+    }
+
+    #[test]
+    fn page_views_are_html_pages_only() {
+        let ctx = ctx();
+        let ua = woothee::parser::Parser::new();
+        let locate = |_: &str| String::new();
+        let c = cleaner(&ctx, &ua, &locate);
+        let view = |path: &str, status: u16, ctype: &str| {
+            let line = json!({ "host": "shop.example.com", "method": "GET", "path": path, "status": status, "content_type": ctype,
+                "remote": "203.0.113.9", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36" });
+            let Some(Cleaned::Request { pageview, .. }) = c.clean(&line, 0) else { panic!("a request") };
+            pageview
+        };
+        assert!(view("/", 200, "text/html; charset=utf-8"));
+        assert!(view("/about", 304, ""));
+        assert!(view("/about", 304, "text/html"));
+        // A redirect's HTML only links to the page.
+        assert!(!view("/", 301, "text/html; charset=UTF-8"));
+        assert!(!view("/old", 302, "text/html"));
+        // Images, files and errors are requests, not page views.
+        assert!(!view("/google.com", 200, "image/x-icon"));
+        assert!(!view("/app.js", 304, ""));
+        assert!(!view("/missing", 404, "text/html"));
     }
 
     #[test]
