@@ -18,6 +18,7 @@ import { Field, Segmented, Select, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
 import { StatusNote } from "~/components/ui/StatusNote";
 import { dateTime, timeAgo } from "~/lib/pyo/format";
+import { Markdown } from "~/lib/pyo/markdown";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type {
@@ -614,9 +615,10 @@ export function UpdateDialog({
                 On GitHub <ArrowSquareOutIcon size={12} aria-hidden />
               </a>
             </h3>
-            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border bg-muted/40 px-3 py-2 font-sans text-[12.5px] leading-5">
-              {latest.notes}
-            </pre>
+            <Markdown
+              source={latest.notes}
+              className="max-h-64 overflow-y-auto break-words rounded-lg border border-border bg-muted/40 px-3 py-2 text-[12.5px] leading-5"
+            />
           </section>
         ) : null}
       </div>
