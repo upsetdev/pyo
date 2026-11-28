@@ -24,7 +24,6 @@ use kube::{
         events::{Event, EventType, Recorder},
     },
 };
-use rand::RngCore;
 use serde_json::{Value, json};
 
 use crate::crd::{self, Database, DatabaseStatus, Engine};
@@ -489,7 +488,7 @@ pub fn secret_name(db: &Database) -> String {
 
 pub fn token(bytes: usize) -> String {
     let mut b = vec![0u8; bytes];
-    rand::rng().fill_bytes(&mut b);
+    rand::fill(&mut b[..]);
     URL_SAFE_NO_PAD.encode(b)
 }
 

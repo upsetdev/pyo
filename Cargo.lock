@@ -3719,7 +3719,7 @@ dependencies = [
  "mysql_async",
  "pyo-proto",
  "pyo-resp",
- "rand 0.9.5",
+ "rand 0.10.3",
  "rustls",
  "schemars 1.2.3",
  "serde",
