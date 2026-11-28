@@ -1092,16 +1092,96 @@ this list wins.
     last one gone) under traffic to web, waf and web's plain HTTP domain
     on :80: 1,878 short requests, 0 failed, 0 long requests cut, 0
     WebSocket drops.
-- **Envoy Gateway v1.9.3 takes no country rule where the visitor comes
-  from X-Forwarded-For** (found with the drain check, 2026-11-27, not
-  fixed): behind a CDN (`firewall.behind`) or through the tunnel, the
-  listener's client policy trusts X-Forwarded-For from `trustedCIDRs`, and
-  `validateAuthorizationGeoIP` refuses that. A route with a country rule
-  there answers 500. The anchor's path there answers 500 instead of 404,
-  and that chain has no geoip filter. `scripts/gateway-drain-check.py`
-  lists those routes. The tunnel design's line that country rules see the
-  visitor through the tunnel (`cloudflare-tunnel.md`) isn't so for Envoy
-  Gateway's country rules: neither gate e2e checks one.
+- **Country rules behind Cloudflare and through the tunnel** (found with
+  the drain check 2026-11-27, fixed 2026-11-28). There the listener's
+  client policy trusts X-Forwarded-For from `trustedCIDRs`, and Envoy
+  Gateway v1.9.3 refuses any `clientIPGeoLocations` rule on such a
+  listener (`validateAuthorizationGeoIP`: "authorization
+  clientIPGeoLocations does not support
+  ClientIPDetection.XForwardedFor.TrustedCIDRs"). The refused route
+  answered 500, so a country rule took the domain down. Confirmed with
+  egctl v1.9.3 on the drain check's `behind_country` and
+  `tunnel_country` objects as the last release wrote them: the SecurityPolicy
+  is not accepted with that message, and the service's route answers
+  500. Fix: on those routes a country is Cloudflare's `CF-IPCountry`
+  header, a `headers` principal (`firewall::COUNTRY_HEADER`,
+  `web_authorization` for `Entry::Https` behind Cloudflare,
+  `tunnel_authorization`). Why it can be trusted there: those policies
+  start with the behind gate (`source.port != 0`, after Let's Encrypt's
+  rule behind Cloudflare, first on the tunnel), which refuses every
+  request whose visitor wasn't read from X-Forwarded-For, that is every
+  connection not from Cloudflare's ranges or the tunnel's connectors.
+  Cloudflare sets the header on every request it passes on. Direct
+  routes keep the GeoIP lookup, and nothing reads the header there.
+  Options not taken: the GeoIP lookup on X-Forwarded-For needs
+  `numTrustedHops` instead of `trustedCIDRs`, which trusts the header
+  from anyone and breaks the gate. Refusing country rules there would
+  drop a feature that works with the header.
+  - The header principal needs no HTTP filter, so a country rule there
+    changes routes only (drain check rows `behind -> behind_country`,
+    `tunnel_on -> tunnel_country` and back). IP rules are as before.
+  - The admission policy lets a web route's rule have a `headers`
+    principal of `cf-ipcountry` only, with country codes, and only in a
+    policy whose first rule (after Let's Encrypt's) is the gate. An
+    install with an older admission policy refuses it: the deploy stops
+    with "Run the command under Refresh this cluster" (`gateway.rs`
+    `COUNTRY_HEADER_REFUSED`), its routes left as they were. A country
+    rule is never left out.
+  - The anchors' own country rule stays `clientIPGeoLocations`: its path
+    still answers 500 instead of 404 on those listeners, which no visitor
+    uses. `scripts/gateway-drain-check.py` now fails on any other route
+    that answers 500.
+  - Cloudflare uses `XX` for no country and `T1` for Tor. Pyo's country
+    codes are letters only, so `T1` can't be named. With Cloudflare's IP
+    geolocation off, the header is missing and no country rule matches
+    ("is not in" rules then refuse everyone).
+  - Not yet run on a cluster (2026-11-28): the traffic e2e's tunnel leg
+    (`update-traffic-e2e.sh fast --dev` with the test zone, service
+    `geo`) checks block and "is not in" rules through the tunnel and
+    direct, with claimed countries. Its first run stopped at the update:
+    the admission policy's new clause had one `)` too many and the API
+    server refused the policy (fixed, and a unit test now checks every
+    expression's parentheses). The rerun waits for a free machine and a
+    signed-in password manager.
+  - Trust is the same as for address rules behind Cloudflare: any
+    Cloudflare request reaches a listener behind Cloudflare, including a
+    Worker of another account that sets its own headers. The tunnel has
+    no such gap: only Pyo's connectors reach its listeners.
+- **A client could claim a country** (found 2026-11-27, fixed
+  2026-11-28). Envoy Gateway's country rules read
+  `x-eg-internal-geoip-country`, which its GeoIP filter sets only when
+  the lookup finds a country (Envoy `geoip_filter.cc`
+  `onLookupComplete`: `setCopy` only for a non-empty result). Envoy
+  Gateway removes that header only on the route, before the request goes
+  upstream (`route.go` `RequestHeadersToRemove`), after its
+  authorization. So for an address the database doesn't place (private
+  and tailnet addresses, addresses GeoLite2 has no country for) the
+  client's own header decided. Fix: every client policy removes every
+  `x-eg-internal-*` header as requests come in
+  (`system::visitor_headers`, `earlyRequestHeaders.removeOnMatch` with
+  prefix `x-eg-internal-`, `system::INTERNAL_HEADER_PREFIX`): Envoy's
+  early header mutation, part of the listener, before any HTTP filter.
+  It's on every listener: each service's HTTPS (direct, behind
+  Cloudflare, tunnel), the shared :80 and the tailnet's.
+  - No route or filter changes. The update changes every listener's
+    connection manager once (the drain check's rollout shows
+    "~connection manager" on each chain), at the same moment as the
+    anchors' own drain. The tailnet's plain HTTP listener drains once
+    too, which it didn't before.
+  - An install whose admission policy is older refuses the new client
+    policies. The agent then writes them as the release before did (the
+    visitor headers removed, these not), and says so as it does for
+    visitor headers (`headersKept`, `gateway.rs` `without_internal`).
+  - Checked on Envoy v1.39.5 with the pinned GeoLite2 database of
+    2026-11-06 (`scripts/geoip-spoof-e2e.sh`, 2026-11-28, 15 of 15 ok).
+    Without the removal, a client the database doesn't place (a private
+    address) got past "only DE" by sending
+    `x-eg-internal-geoip-country: DE` (200). With it the same request,
+    the header in another case, and `CF-IPCountry: DE` all got 403, and
+    a placed address always got its own country. Behind the gate,
+    `CF-IPCountry` decided for the CDN's requests (RU 403, DE 200), and a
+    direct client's `CF-IPCountry` got 403, with or without
+    X-Forwarded-For.
 - **Pyo's own tailnet routes** (`pyo-dashboard`, `pyo-registry-door`,
   `pyo-sandboxes`) each get a BackendTrafficPolicy with the idle rate
   limit, pinned exactly by the admission policy. With it and the tailnet

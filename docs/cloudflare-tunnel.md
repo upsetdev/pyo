@@ -1193,8 +1193,12 @@ CEL pins near `:649-660`) with exactly this spec.
   Tunnel routes with both kinds of domains are split: `{base}-tunnel-{port}`
   for `"on"` names, `{base}-switching-{port}` for the others.
 - **Firewall, rate limits, WAF, countries**: unchanged. They read the
-  visitor Envoy worked out, so they see the real one. GeoIP country follows
-  the visitor address. The access log's `remote` field
+  visitor Envoy worked out, so they see the real one. Country rules match
+  Cloudflare's `CF-IPCountry` header on tunnel routes, after the gate
+  (`firewall::COUNTRY_HEADER`): Envoy Gateway v1.9.3 refuses its GeoIP
+  country rules where the visitor comes from X-Forwarded-For
+  (traffic-and-gateway-design.md, "Country rules behind Cloudflare and
+  through the tunnel", 2026-11-28). The access log's `remote` field
   (`system.rs:68`) is the visitor, so analytics and the request explorer
   are right.
 - The service's own "Behind Cloudflare" switch (`firewall.behind`) doesn't
@@ -1248,6 +1252,8 @@ header is Cloudflare's own, so audit and rate limits see the real visitor.
 - Every client policy sets `headers.earlyRequestHeaders.remove`
   (`system::visitor_headers`): CF-Connecting-IP, CF-Connecting-IPv6,
   True-Client-IP, Fastly-Client-IP, X-Real-IP, X-Client-IP and Forwarded.
+  Since 2026-11-28 also every `x-eg-internal-*` header
+  (`removeOnMatch`), which Envoy Gateway's country rules read.
   `pyo-https` with origin pull keeps the four CDN headers (only the CDN
   connects). A service behind Cloudflare keeps Cloudflare's two. The
   tailnet Gateway gets a policy of its own (`pyo-tailnet`) with the full
