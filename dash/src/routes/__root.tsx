@@ -54,12 +54,14 @@ function RootDocument({ children }: { children: ReactNode }) {
   );
 }
 
-const bootScript = `document.documentElement.dataset.boot=/^\\/(login|signup|setup)(\\/|$)/.test(location.pathname)?"auth":"app"`;
+// data-boot-page picks the content's outline for pages with their own (styles.css).
+const bootScript = `(function(){var d=document.documentElement.dataset,p=location.pathname;d.boot=/^\\/(login|signup|setup)(\\/|$)/.test(p)?"auth":"app";if(/^\\/[^/]+\\/clusters\\/[^/]+\\/settings\\/?$/.test(p))d.bootPage="cluster-settings"})()`;
 
 /**
  * What shows from the first paint, before any JavaScript, until a page marked
  * data-ready renders (styles.css): the dashboard's frame, or the sign-in form's
- * outline, by path.
+ * outline, by path. In the frame, a cluster's Settings tab gets its own
+ * outline (BootShell), other pages a generic one.
  */
 function BootSkeleton() {
   const bar = "rounded-md bg-muted/70";
