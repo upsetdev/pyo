@@ -202,8 +202,9 @@ off, as today. The dialog keeps that line.
 
 ### 4.5 TCP and UDP ports and PROXY protocol
 
-These two move into the Traffic card and attach to Public ports, since
-both are about direct connections to the servers.
+TCP and UDP ports move into the Traffic card and attach to Public ports,
+since they are about direct connections to the servers. PROXY protocol
+sits in the Gateway card with the other listener settings (§12).
 
 - **TCP and UDP ports** (today's "Public TCP and UDP ports" in tunnel
   mode, `Tunnel.tsx:244`). Shown only when the cluster has a service with
@@ -216,10 +217,11 @@ both are about direct connections to the servers.
   - When Public ports goes off, its confirm dialog shows this switch, on
     by default when the cluster has such ports. This keeps today's
     default for tunnel mode.
-- **PROXY protocol** (today's switch in Traffic routing,
-  `TrafficMode.tsx:86`). An indented switch under Public ports: "Accept
-  PROXY protocol", "Only if every connection comes through a load
-  balancer that sends it." It drains every web connection once (§9).
+- **PROXY protocol** (moved to the Gateway card on 2026-11-28). A switch
+  next to HTTP/3 and the minimum TLS version: "PROXY protocol", "Only for
+  a load balancer that sends it on every connection." It drains every web
+  connection once (§9). It still saves through `setClusterPaths` with
+  `proxyProtocol`, so the API is unchanged.
 
 ### 4.6 New domains
 
@@ -244,8 +246,6 @@ Traffic                                                   Learn more
 ─────────────────────────────────────────────────────────────────────
 Public ports                                                  [on ]
 Ports 80 and 443 on every server except build-only servers.
-   Accept PROXY protocol                                      [off]
-   Only if every connection comes through a load balancer that sends it.
    TCP and UDP ports            Published with the websites.
 ─────────────────────────────────────────────────────────────────────
 Cloudflare Tunnel                                             [on ]
@@ -314,11 +314,7 @@ Turning Tailnet off:
   on the tailnet."
 - Buttons: "Cancel", "Stop serving".
 
-Turning PROXY protocol on or off:
-
-- Title: "Accept PROXY protocol on eu?"
-- Body: "Saving drops open connections on every website of eu once.
-  Visitors reconnect. WebSockets and uploads in progress are cut."
+PROXY protocol's confirm is in the Gateway card now (§12).
 
 ### 5.3 Domain dialog (`AddDomainDialog.tsx`)
 
@@ -717,6 +713,8 @@ HTTP/3                                                         [off]
 Compression                                                    [off]
              Zstd, Brotli and Gzip. Files that are already compressed are skipped.
 TLS minimum  [1.2 ▾]
+PROXY protocol                                                 [off]
+             Only for a load balancer that sends it on every connection.
 ─────────────────────────────────────────────────────────────────────
 Defaults for every service
 Request timeout   [300] seconds      A service's own setting wins.
@@ -740,6 +738,14 @@ Idle timeout      [60] minutes       How long a WebSocket may stay quiet.
   only.
 - HTTP/3 disabled with "Turn on public ports first." while Public ports
   is off.
+- PROXY protocol (moved here from the Traffic card on 2026-11-28) saves
+  on its own, not with Save, through `setClusterPaths` with
+  `proxyProtocol`. Its confirm: "Turn on PROXY protocol on eu?" or "Turn
+  off PROXY protocol on eu?", with "Open connections to every website on
+  eu drop once. WebSockets and uploads in progress are cut." Toasts:
+  "PROXY protocol on", "PROXY protocol off". While Public ports is off it
+  says "Turn on public ports first." and can't be turned on. A switch
+  that is on stays on and can still be turned off.
 - After HTTP/3 is on, the UDP check lines show under its row (§11.1).
 - Errors, plain: "UDP port 443 is in use on server-2 by shop/game.
   Free it first.", "The request timeout is 1 to 3600 seconds, or 0 for no
