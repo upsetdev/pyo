@@ -38,6 +38,7 @@ A version is one number for everything: `version` in the root `Cargo.toml`.
 `.github/workflows/release.yml` then checks that the tag matches `Cargo.toml`,
 runs the tests (the WAF's Go tests in `waf/` too), publishes signed images
 to `ghcr.io/upsetdev/{pyo,pyo-agent,pyo-builder,pyo-flows,pyo-waf,pyo-geoip,pyo-db-controller,pyo-kv,pyo-static,pyo-postgres,pyo-mysql-operator,pyo-mysql-backup}`
+and copies them to the same names on Docker Hub
 (see [Image names](#image-names);
 all from `deploy/images/`, at the same version, except `waf` and `geoip`,
 see [Images with their own tag](#images-with-their-own-tag). The Rust
@@ -811,6 +812,31 @@ old nested name. `installed_pyos_accept_the_release_this_tree_makes` and
 `the_folder_of_pyos_own_images_is_ghcr_io_upsetdev`
 (`crates/pyo-proto/src/lib.rs`) run 0.51.0's rule on the release this
 tree makes.
+
+### Docker Hub
+
+Each release copies Pyo's images to Docker Hub under the same names,
+`docker.io/upsetdev/pyo-agent`, so installs have a second place to pull
+from when ghcr.io is down. The **Copy to Docker Hub** job in
+`release.yml` runs after every image is on ghcr.io and before the GitHub
+release is made:
+
+- `scripts/copy-image.sh` copies each image as it is (every platform,
+  its attestations) and its cosign signature (the `sha256-<digest>`
+  tag). It checks the copy's digest is ghcr.io's, and that cosign finds
+  the release workflow's signature on the copy.
+- Then it checks anyone can pull it.
+- Any failure stops the release before it's published. Run the job
+  again: it copies only what's missing.
+
+It logs in as the organization `upsetdev` with an organization access
+token, the secret `DOCKERHUB_TOKEN` of the GitHub environment `release`.
+The token needs read and write on the organization's repositories. Each
+image needs a public repository on Docker Hub: `pyo`, `pyo-agent`,
+`pyo-builder`, `pyo-flows`, `pyo-waf`, `pyo-geoip`, `pyo-db-controller`,
+`pyo-kv`, `pyo-static`, `pyo-postgres`, `pyo-mysql-operator`,
+`pyo-mysql-backup`. Make a new one public before its first release, or
+the job fails and names it.
 
 ### Old names
 
