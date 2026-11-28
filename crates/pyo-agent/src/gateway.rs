@@ -773,6 +773,18 @@ fn older_form(o: &Value) -> Option<Vec<Value>> {
     }
 }
 
+/// Said when the install refuses a country rule behind Cloudflare or
+/// through the tunnel ([`country_by_header`]).
+pub const COUNTRY_HEADER_REFUSED: &str = "This cluster's install is older than Pyo's, so country rules can't apply to domains behind Cloudflare or through Cloudflare Tunnel yet. Run the command under Refresh this cluster in the cluster's settings, then deploy again.";
+
+/// A SecurityPolicy with a country rule as Cloudflare's header
+/// (firewall.rs `COUNTRY_HEADER`).
+fn country_by_header(o: &Value) -> bool {
+    o["spec"]["authorization"]["rules"]
+        .as_array()
+        .is_some_and(|rules| rules.iter().any(|r| r["principal"]["headers"].is_array()))
+}
+
 /// An HTTPS Gateway's anchor route or its policies (`<gateway>-anchor`).
 fn is_anchor(o: &Value) -> bool {
     let Some(gateway) = o["metadata"]["name"].as_str().and_then(|n| n.strip_suffix("-anchor")) else {
@@ -1167,6 +1179,14 @@ pub async fn apply(
                     wanted.insert((kind.clone(), name), ());
                 }
                 continue;
+            }
+            // An install older than this agent refuses a country rule as
+            // Cloudflare's header (behind Cloudflare, through the tunnel).
+            // Leaving it out would let in whom it blocks: the deploy stops
+            // here, its routes as they were, and it says what to run.
+            Err(e) if kind == "SecurityPolicy" && country_by_header(o) && crate::refused::is_refusal(&e) => {
+                tracing::warn!(error = %e, name = %name, "the install refuses a country rule through Cloudflare");
+                return Err(anyhow::anyhow!(COUNTRY_HEADER_REFUSED));
             }
             // An install older than this agent doesn't know the tunnel's
             // policy: the rest of the routes still go on, and it's said.
@@ -2577,14 +2597,27 @@ pub fn without_headers(o: &Value) -> Option<Value> {
     Some(older)
 }
 
+/// A client policy that removes visitor headers but not Envoy Gateway's
+/// own (`x-eg-internal-*`, system.rs `INTERNAL_HEADER_PREFIX`): the shape
+/// an install from before that accepts.
+pub fn without_internal(o: &Value) -> Option<Value> {
+    o["spec"]["headers"]["earlyRequestHeaders"].get("removeOnMatch")?;
+    let mut older = o.clone();
+    older["spec"]["headers"]["earlyRequestHeaders"]
+        .as_object_mut()?
+        .remove("removeOnMatch");
+    Some(older)
+}
+
 /// Write a ClientTrafficPolicy. When the cluster's install refuses one
 /// that removes visitor headers (its admission policy is older than this
-/// agent's, and the cluster can't refresh it), it's written without them,
-/// as that install accepts, so routes, certificates and the rest still go
-/// on. That's said once ([`HEADERS_KEPT`]) and reported until such a
-/// write goes through.
+/// agent's, and the cluster can't refresh it), it's written as that
+/// install accepts: without removing Envoy Gateway's own headers, else
+/// without its `headers` at all. So routes, certificates and the rest
+/// still go on. That's said once ([`HEADERS_KEPT`]) and reported until
+/// such a write goes through.
 async fn write_client_policy(api: &Api<DynamicObject>, name: &str, o: &Value) -> kube::Result<()> {
-    let refused = match api.patch(name, &pp(), &Patch::Apply(o)).await {
+    let first = match api.patch(name, &pp(), &Patch::Apply(o)).await {
         Ok(_) => {
             if o["spec"].get("headers").is_some() {
                 KEPT.store(false, Ordering::Relaxed);
@@ -2593,14 +2626,26 @@ async fn write_client_policy(api: &Api<DynamicObject>, name: &str, o: &Value) ->
         }
         Err(e) => e,
     };
-    let Some(older) = without_headers(o).filter(|_| crate::refused::is_refusal(&refused)) else {
-        return Err(refused);
-    };
-    api.patch(name, &pp(), &Patch::Apply(&older)).await?;
-    if !KEPT.swap(true, Ordering::Relaxed) {
-        tracing::warn!(policy = name, error = %refused, "{HEADERS_KEPT}");
+    let mut refused = first.to_string();
+    let mut last = first;
+    for older in [without_internal(o), without_headers(o)].into_iter().flatten() {
+        if !crate::refused::is_refusal(&last) {
+            break;
+        }
+        match api.patch(name, &pp(), &Patch::Apply(&older)).await {
+            Ok(_) => {
+                if !KEPT.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(policy = name, error = %refused, "{HEADERS_KEPT}");
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                refused = e.to_string();
+                last = e;
+            }
+        }
     }
-    Ok(())
+    Err(last)
 }
 
 /// A service's CDN client policy with these websites' settings, its CDN,
@@ -5977,6 +6022,61 @@ mod tests {
         kube.admit(|w| (w.plural == "clienttrafficpolicies").then(|| (500, "etcd timeout".into())));
         assert!(apply(&client, &pyo, &b).await.is_err());
         assert!(!headers_kept());
+    }
+
+    /// An install from before client policies removed Envoy Gateway's own
+    /// headers (`x-eg-internal-*`): it takes them with the visitor headers'
+    /// removal, so that's how they're written, and it's reported.
+    #[tokio::test]
+    async fn an_install_without_internal_headers_keeps_the_visitor_headers_removal() {
+        let _one = OLDER_INSTALL.lock().await;
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let at = |name: &str| format!("apis/gateway.envoyproxy.io/v1alpha1/namespaces/{GATEWAY_NS}/clienttrafficpolicies/{name}");
+        kube.admit(|w| {
+            let internal = w.body["spec"]["headers"]["earlyRequestHeaders"].get("removeOnMatch").is_some();
+            (w.method != "DELETE" && internal).then(|| (403, "ValidatingAdmissionPolicy 'pyo-agent' denied request".to_owned()))
+        });
+        write_web(&client, system::WebSettings::default()).await.expect("the gateway's settings");
+        for name in ["pyo-http", "pyo-https"] {
+            let p = kube.get(&at(name)).expect(name);
+            let early = &p["spec"]["headers"]["earlyRequestHeaders"];
+            assert_eq!(early["remove"], system::visitor_headers(&[])["earlyRequestHeaders"]["remove"], "{name}");
+            assert!(early.get("removeOnMatch").is_none(), "{name}");
+        }
+        assert!(headers_kept());
+
+        // The new install takes them whole.
+        kube.admit(|_| None);
+        write_web(&client, system::WebSettings::default()).await.unwrap();
+        assert_eq!(kube.get(&at("pyo-https")).unwrap()["spec"]["headers"], system::visitor_headers(&[]));
+        assert!(!headers_kept());
+    }
+
+    /// An install whose admission policy is older refuses a country rule
+    /// as Cloudflare's header (behind Cloudflare, through the tunnel): the
+    /// deploy stops with what to run, as leaving the rule out would let in
+    /// whom it blocks.
+    #[tokio::test]
+    async fn an_older_install_refusing_a_country_header_stops_the_deploy() {
+        let _one = OLDER_INSTALL.lock().await;
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        kube.admit(|w| {
+            let by_header = w.plural == "securitypolicies" && country_by_header(&w.body);
+            (w.method != "DELETE" && by_header).then(|| (403, "ValidatingAdmissionPolicy 'pyo-agent' denied request".to_owned()))
+        });
+        let mut t = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
+        t.domains[0].tunnel = pyo_proto::TUNNEL_ON.into();
+        t.firewall = Some(Firewall {
+            rules: vec![pyo_proto::firewall::FirewallRule { id: "fwr_1".into(), action: "block".into(), operator: "in".into(), sources: vec!["RU".into()], limit: None }],
+            ..Default::default()
+        });
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let e = apply(&client, &pyo, &t).await.expect_err("a country rule it refuses");
+        assert_eq!(e.to_string(), COUNTRY_HEADER_REFUSED);
+        assert!(kube.refused().iter().any(|w| w.plural == "securitypolicies" && country_by_header(&w.body)));
+        // The new install takes it.
+        kube.admit(|_| None);
+        apply(&client, &pyo, &t).await.expect("the tunnel domain's routes");
     }
 
     /// What a cluster still on 0.5.5's admission policy accepts of the

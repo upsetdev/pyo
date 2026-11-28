@@ -67,8 +67,8 @@ STABLE = [
     ("all_rules", "base"),
     ("base", "all_rules"),
     # Where the visitor comes from X-Forwarded-For (behind a CDN, through
-    # the tunnel), Envoy Gateway takes no country rule: no geoip filter
-    # there either way (the routes answer 500, listed below).
+    # the tunnel), a country is Cloudflare's CF-IPCountry header, matched
+    # in the route's authorization: no geoip filter there either way.
     ("behind_country", "behind"),
     ("behind", "behind_country"),
     ("tunnel_country", "tunnel_on"),
@@ -159,8 +159,9 @@ def previous(objs):
     """The objects as the release before the Gateway section wrote them:
     no anchor routes, their policies or their filter (the shared :80's
     anchor too), no policy on Pyo's own tailnet
-    routes, no compression or idle timeout on routes, no HTTP/3 or TLS
-    minimum on the client policies."""
+    routes, no compression or idle timeout on routes, no HTTP/3, TLS
+    minimum or removal of Envoy Gateway's own headers on the client
+    policies."""
     out = []
     for o in objs:
         name, kind = o["metadata"]["name"], o["kind"]
@@ -173,6 +174,9 @@ def previous(objs):
             o["spec"].pop("compressor", None)
             o["spec"].pop("timeout", None)
         if kind == "ClientTrafficPolicy":
+            # Envoy Gateway's own headers removed on every listener
+            # (system.rs INTERNAL_HEADER_PREFIX): new in this release too.
+            o["spec"].get("headers", {}).get("earlyRequestHeaders", {}).pop("removeOnMatch", None)
             o["spec"].pop("http3", None)
             o["spec"].get("tls", {}).pop("minVersion", None)
             if o["spec"].get("tls") == {}:
@@ -293,6 +297,10 @@ def failing(path):
 
 
 def compare(d):
+    """Exits 1 too when a route other than an anchor answers 500: Envoy
+    Gateway refused a service's policy there. An anchor's country rule is
+    refused where the visitor comes from X-Forwarded-For, and its path
+    there answers 500 instead of 404, which no visitor uses."""
     bad = 0
     for kind, pairs in (("must change only routes", STABLE), ("known to drop connections", KNOWN)):
         print(f"{kind}:")
@@ -308,7 +316,10 @@ def compare(d):
     for f in sorted(os.listdir(d)):
         if f.endswith(".json"):
             for r in failing(f"{d}/{f}"):
-                print(f"  {f[:-5]}: {short(r)}")
+                anchor = "-anchor" in r
+                print(f"  {f[:-5]}: {short(r)}{' (an anchor)' if anchor else ''}")
+                if not anchor:
+                    bad = 1
     return bad
 
 

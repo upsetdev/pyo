@@ -27,7 +27,9 @@
 //! A website can be behind a CDN (`Firewall::behind`, Cloudflare for now):
 //! only the CDN may reach it, and the visitor is the address the CDN
 //! forwards, trusted only from the CDN's own ranges ([`web_authorization`],
-//! system.rs `cdn_client_policy_spec`).
+//! system.rs `cdn_client_policy_spec`). There, and through Cloudflare
+//! Tunnel, the visitor's country is the one Cloudflare sends
+//! ([`COUNTRY_HEADER`]), checked only after the behind gate.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -150,6 +152,41 @@ pub const ACME_PREFIX: &str = "/.well-known/acme-challenge/";
 /// e2e check `scripts/cdn-gate-e2e.sh` runs it against a real proxy.
 pub const BEHIND_GATE_CEL: &str = "source.port != 0";
 
+/// The header Cloudflare puts the visitor's country in (CF-IPCountry: an
+/// ISO 3166 code, XX when it has none, T1 for Tor), on every request it
+/// passes on, through the tunnel too. Country rules match it where the
+/// visitor comes from X-Forwarded-For (behind Cloudflare, through the
+/// tunnel): Envoy Gateway v1.9.3 refuses its GeoIP lookup there
+/// (`validateAuthorizationGeoIP` takes no `trustedCIDRs`), and a route
+/// whose policy it refuses answers 500. Only after the behind gate
+/// ([`behind_gate_rule`]), which refuses every request that didn't come
+/// through Cloudflare's ranges or the tunnel's connectors, so the header
+/// is Cloudflare's own there. Anywhere else nothing reads it.
+pub const COUNTRY_HEADER: &str = "cf-ipcountry";
+
+/// Where a route's country rules find the visitor's country.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Geo {
+    /// Nowhere: a country is never "in" a list (TCP ports, and plain HTTP
+    /// behind a CDN, where the proxy only sees the CDN).
+    Off,
+    /// The proxy's GeoIP lookup of the visitor's address.
+    Lookup,
+    /// Cloudflare's [`COUNTRY_HEADER`], behind the gate only.
+    Cloudflare,
+}
+
+/// How a website behind `cdn` (one of [`BEHIND`], or the tunnel) has its
+/// visitors' countries. Cloudflare is the only one now. Another CDN gets
+/// the GeoIP lookup, which Envoy Gateway refuses there: its routes answer
+/// 500 rather than let a country rule pass unchecked.
+fn geo_behind(cdn: &str) -> Geo {
+    match cdn {
+        "cloudflare" => Geo::Cloudflare,
+        _ => Geo::Lookup,
+    }
+}
+
 /// A rate limit rule's limit: `requests` per `per` ("second" or "minute")
 /// from each client address.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -217,12 +254,12 @@ impl FirewallRule {
 
     /// What the rule lists, as a term: none when it can't match here
     /// (countries where they don't count). Ignores the operator.
-    fn listed(&self, geo: bool) -> Option<Term> {
+    fn listed(&self, geo: Geo) -> Option<Term> {
         if self.any() {
             return Some(Term::ALL);
         }
         if self.has_countries() {
-            return geo.then(|| Term {
+            return (geo != Geo::Off).then(|| Term {
                 cidrs: None,
                 countries: Some(self.countries().map(str::to_owned).collect()),
             });
@@ -396,7 +433,9 @@ impl Term {
         countries: None,
     };
 
-    fn principal(&self) -> Value {
+    /// The principal, with countries as `geo` has them (never
+    /// [`Geo::Off`]: a term with countries isn't made there).
+    fn principal(&self, geo: Geo) -> Value {
         let mut p = serde_json::Map::new();
         p.insert(
             "clientCIDRs".into(),
@@ -411,14 +450,21 @@ impl Term {
             if self.cidrs.is_none() {
                 p.remove("clientCIDRs");
             }
-            p.insert(
-                "clientIPGeoLocations".into(),
-                json!(
-                    cc.iter()
-                        .map(|c| json!({ "country": c }))
-                        .collect::<Vec<_>>()
-                ),
-            );
+            if geo == Geo::Cloudflare {
+                p.insert(
+                    "headers".into(),
+                    json!([{ "name": COUNTRY_HEADER, "values": cc }]),
+                );
+            } else {
+                p.insert(
+                    "clientIPGeoLocations".into(),
+                    json!(
+                        cc.iter()
+                            .map(|c| json!({ "country": c }))
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
         }
         Value::Object(p)
     }
@@ -487,13 +533,18 @@ fn and(x: &Term, y: &Term) -> Option<Term> {
 /// is named after its rule, so the access log's "denied" says which kind it
 /// was (the API names the rule from the address, `blocking_rule`).
 pub fn authorization(layers: &[&Firewall], geo: bool) -> Option<Value> {
+    authorize(layers, if geo { Geo::Lookup } else { Geo::Off })
+}
+
+/// [`authorization`], with countries as `geo` has them.
+fn authorize(layers: &[&Firewall], geo: Geo) -> Option<Value> {
     let expanded = expand_all(layers);
     let layers: Vec<&Firewall> = expanded.iter().collect();
     let layers = layers.as_slice();
     let mut rules = vec![];
     let push = |rules: &mut Vec<Value>, name: &str, action: &str, t: &Term| {
         let action = if action == "block" { "Deny" } else { "Allow" };
-        rules.push(json!({ "name": name, "action": action, "principal": t.principal() }));
+        rules.push(json!({ "name": name, "action": action, "principal": t.principal(geo) }));
     };
     // What later rules still see (none: nothing), and the "is not in"
     // rules passed: (what the rules saw then, the rule).
@@ -541,7 +592,7 @@ pub enum Entry {
 /// (Envoy Gateway wants a principal in every rule: any address. `invert`
 /// as its CRD defaults it, so the admission policy sees it as written.)
 pub fn acme_rule() -> Value {
-    json!({ "name": "acme", "action": "Allow", "operation": { "path": { "type": "PathPrefix", "value": ACME_PREFIX, "invert": false } }, "principal": Term::ALL.principal() })
+    json!({ "name": "acme", "action": "Allow", "operation": { "path": { "type": "PathPrefix", "value": ACME_PREFIX, "invert": false } }, "principal": Term::ALL.principal(Geo::Off) })
 }
 
 /// A website route's authorization while its firewall refuses no one: Let's
@@ -584,13 +635,14 @@ pub fn behind_gate_rule() -> Value {
 /// A website route's authorization ([`authorization`], with countries):
 /// Let's Encrypt's challenges first, whatever follows; then, behind a CDN,
 /// the CDN's connections only, and on HTTPS the service's rules for the
-/// visitor the CDN forwards. Over plain HTTP the proxy only sees the CDN,
+/// visitor the CDN forwards, countries as the CDN gives them
+/// ([`COUNTRY_HEADER`]). Over plain HTTP the proxy only sees the CDN,
 /// so there the CDN check is all (its rules can't tell visitors apart).
 /// None when nothing is refused.
 pub fn web_authorization(fw: &Firewall, entry: Entry) -> Option<Value> {
     let (head, rest) = match (fw.behind_ranges(), entry) {
-        (None, _) => (None, authorization(&[fw], true)),
-        (Some(_), Entry::Https) => (Some(behind_gate_rule()), authorization(&[fw], true)),
+        (None, _) => (None, authorize(&[fw], Geo::Lookup)),
+        (Some((cdn, _)), Entry::Https) => (Some(behind_gate_rule()), authorize(&[fw], geo_behind(cdn))),
         (Some((_, ranges)), Entry::Http) => {
             let gate = Firewall {
                 rules: vec![FirewallRule {
@@ -627,13 +679,14 @@ pub fn web_authorization(fw: &Firewall, entry: Entry) -> Option<Value> {
 /// at the tunnel (`DomainSpec::tunnel_only`): the behind gate first, so only
 /// the tunnel's connectors (whose visitor was read from X-Forwarded-For)
 /// get through and a direct connection gets 403, then the service's own
-/// rules. The service's own "behind" CDN doesn't apply there.
+/// rules, countries as Cloudflare gives them ([`COUNTRY_HEADER`]). The
+/// service's own "behind" CDN doesn't apply there.
 pub fn tunnel_authorization(fw: &Firewall) -> Value {
     let own = Firewall {
         behind: None,
         ..fw.clone()
     };
-    let (default, rules) = match authorization(&[&own], true) {
+    let (default, rules) = match authorize(&[&own], Geo::Cloudflare) {
         Some(a) => (
             a["defaultAction"].clone(),
             a["rules"].as_array().cloned().unwrap_or_default(),
@@ -1139,6 +1192,77 @@ mod tests {
         c.presets.clear();
         let h = web_authorization(&c, Entry::Http).unwrap();
         assert_eq!(h["rules"][1]["principal"]["clientCIDRs"], json!([NOTHING]));
+    }
+
+    /// Behind Cloudflare and through the tunnel, the visitor comes from
+    /// X-Forwarded-For, where Envoy Gateway refuses its GeoIP lookup: a
+    /// country is Cloudflare's CF-IPCountry there, and only after the
+    /// gate. Direct, it's the lookup, and the header means nothing.
+    #[test]
+    fn countries_behind_cloudflare_are_its_header() {
+        let rules = vec![
+            rule("ru", "block", "in", &["RU", "BY"]),
+            rule("net", "block", "in", &["203.0.113.0/24"]),
+            rule("de", "block", "notIn", &["DE"]),
+        ];
+        let mut c = fw(rules.clone());
+        c.behind = Some("cloudflare".into());
+        c.presets = cf();
+        let header = |a: &Value| -> Vec<Value> {
+            a["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["principal"].get("headers").is_some())
+                .map(|r| r["principal"].clone())
+                .collect()
+        };
+        let behind = web_authorization(&c, Entry::Https).unwrap();
+        let tunnel = tunnel_authorization(&fw(rules.clone()));
+        for (a, gate_at) in [(&behind, 1), (&tunnel, 0)] {
+            // The gate first (after the challenge path), then the rules.
+            assert_eq!(a["rules"][gate_at], behind_gate_rule());
+            assert!(!a.to_string().contains("clientIPGeoLocations"), "{a}");
+            let h = header(a);
+            assert_eq!(
+                h[0],
+                json!({ "headers": [{ "name": "cf-ipcountry", "values": ["RU", "BY"] }] })
+            );
+            // "is not in" DE: the rules after it see only DE's visitors.
+            assert_eq!(
+                h.last().unwrap(),
+                &json!({ "headers": [{ "name": "cf-ipcountry", "values": ["DE"] }] })
+            );
+            assert_eq!(a["defaultAction"], "Deny");
+            // Address rules as before.
+            assert!(a.to_string().contains("203.0.113.0/24"));
+        }
+        // Direct: the lookup, never the header.
+        let direct = web_authorization(&fw(rules.clone()), Entry::Https).unwrap();
+        assert!(header(&direct).is_empty());
+        assert!(!direct.to_string().contains(COUNTRY_HEADER));
+        assert_eq!(
+            direct["rules"][1]["principal"]["clientIPGeoLocations"],
+            json!([{ "country": "RU" }, { "country": "BY" }])
+        );
+        // Plain HTTP behind the CDN: no countries at all.
+        let h = web_authorization(&c, Entry::Http).unwrap();
+        assert!(!h.to_string().contains("RU") && !h.to_string().contains(COUNTRY_HEADER));
+        // Another CDN (none yet): the lookup, which Envoy Gateway refuses
+        // there, so its routes answer 500 rather than skip the rule.
+        c.behind = Some("fastly".into());
+        let other = web_authorization(&c, Entry::Https).unwrap();
+        assert!(other.to_string().contains("clientIPGeoLocations"));
+        assert!(header(&other).is_empty());
+        // Address and country together: both in one principal.
+        let both = authorize(&[&fw(vec![
+            rule("a", "block", "notIn", &["203.0.113.0/24"]),
+            rule("b", "allow", "in", &["FR"]),
+        ])], Geo::Cloudflare)
+        .unwrap();
+        let p = &both["rules"][0]["principal"];
+        assert_eq!(p["clientCIDRs"], json!(["203.0.113.0/24"]));
+        assert_eq!(p["headers"], json!([{ "name": "cf-ipcountry", "values": ["FR"] }]));
     }
 
     /// Every preset at once, the largest lists as long as their providers'
