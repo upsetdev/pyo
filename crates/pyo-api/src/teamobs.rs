@@ -211,11 +211,16 @@ pub async fn choices<'e>(db: impl sqlx::PgExecutor<'e>, team_ids: &[String]) -> 
 }
 
 /// Every team's choices (for a change of the installation's limits).
+///
+/// The rows are held (FOR KEY SHARE) until the caller's transaction ends:
+/// a team deleted meanwhile would make its activity entry fail, and with
+/// it the whole save.
 pub async fn all_choices<'e>(db: impl sqlx::PgExecutor<'e>) -> ApiResult<Vec<(String, Choice)>> {
-    let rows: Vec<ChoiceRow> =
-        sqlx::query_as("SELECT id, observability_on, request_logs_on, ip_mode, query_strings FROM pyo.teams ORDER BY id")
-            .fetch_all(db)
-            .await?;
+    let rows: Vec<ChoiceRow> = sqlx::query_as(
+        "SELECT id, observability_on, request_logs_on, ip_mode, query_strings FROM pyo.teams ORDER BY id FOR KEY SHARE",
+    )
+    .fetch_all(db)
+    .await?;
     Ok(rows.iter().map(|r| (r.0.clone(), choice_of(r))).collect())
 }
 
