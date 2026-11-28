@@ -130,10 +130,19 @@ async fn a_tunnel_runs_its_course_over_http() {
     let now = cf.records(ZONE);
     assert_eq!(now.len(), 1);
     assert_eq!(now[0]["content"], json!(target));
+    // In place: a PUT on the same record, never a DELETE or POST.
+    assert_eq!(record.id, "a1");
+    let dns_writes = |cf: &FakeCf| -> Vec<String> {
+        cf.calls().into_iter().filter(|c| c.contains("/dns_records") && !c.starts_with("GET ")).collect()
+    };
+    assert_eq!(dns_writes(&cf), [format!("PUT /zones/{ZONE}/dns_records/a1")]);
     // Back exactly as it was.
     revert_record(&http, ZONE, "blog.example.com", Some(&record.id), &previous, None, MARK).await.unwrap();
+    assert_eq!(dns_writes(&cf).len(), 2);
+    assert!(dns_writes(&cf).iter().all(|c| c.starts_with("PUT ")));
     let back = cf.records(ZONE);
     assert_eq!(back.len(), 1);
+    assert_eq!(back[0]["id"], "a1");
     for (k, v) in [("type", json!("A")), ("content", json!("198.51.100.9")), ("proxied", json!(true)), ("ttl", json!(300)), ("comment", json!("by hand"))] {
         assert_eq!(back[0][k], v, "{k}");
     }
@@ -294,6 +303,7 @@ fn the_tunnel_loop_end_to_end() {
         let now = cf.records(ZONE);
         assert_eq!(now.len(), 1);
         assert_eq!(now[0]["content"], json!(tunnel::cname_target(&tunnel_id)));
+        assert_eq!(now[0]["id"], json!(format!("hand{run}")), "edited in place, never deleted");
 
         // Switch back with the kept record: both paths first, then it's back.
         q("UPDATE pyo.dns_records SET status = 'reverting', restore = true, routes_command = NULL WHERE service_id = $1").bind(&svc).execute(&db).await.unwrap();
@@ -303,6 +313,8 @@ fn the_tunnel_loop_end_to_end() {
         assert!(d.get("tunnel").is_none() && d["tlsMode"] == "auto", "{d}");
         let back = cf.records(ZONE);
         assert_eq!((back.len(), back[0]["content"].as_str(), back[0]["ttl"].as_i64()), (1, Some("198.51.100.9"), Some(300)));
+        assert_eq!(back[0]["id"], json!(format!("hand{run}")), "put back in place");
+        assert!(back[0].get("comment").is_none(), "no Pyo comment left on someone's record: {}", back[0]);
 
         // Switched again, then the service deleted: its CNAME goes with it.
         cf.state.lock().unwrap().records.clear();

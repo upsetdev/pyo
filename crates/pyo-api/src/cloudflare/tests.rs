@@ -53,6 +53,10 @@ pub(super) struct Fake {
     /// Records' TTLs, by id (1, automatic, when not set).
     pub ttls: Mutex<HashMap<String, u32>>,
     pub calls: Mutex<Vec<String>>,
+    /// Names a delete left with no A, AAAA or CNAME record: a resolver
+    /// asking then would cache NXDOMAIN (or no data) for the zone's
+    /// negative TTL.
+    pub emptied: Mutex<Vec<String>>,
     next: Mutex<u32>,
     /// Each zone's account (acct1 "Acme" when not set).
     pub accounts: HashMap<String, (String, String)>,
@@ -81,6 +85,7 @@ impl Fake {
             records: Mutex::new(vec![]),
             ttls: Mutex::new(HashMap::new()),
             calls: Mutex::new(vec![]),
+            emptied: Mutex::new(vec![]),
             next: Mutex::new(0),
             accounts: HashMap::new(),
             no_tunnels: vec![],
@@ -207,6 +212,32 @@ impl Fake {
     fn denied() -> CfError {
         CfError::Denied("Authentication error".into())
     }
+
+    /// Names a delete left with no record ([`Fake::emptied`]).
+    pub fn emptied(&self) -> Vec<String> {
+        self.emptied.lock().unwrap().clone()
+    }
+
+    /// Cloudflare's rule: a CNAME is alone at its name, so it can't join
+    /// an A, AAAA or CNAME there, nor they it (code 81053). `id` is the
+    /// record being overwritten, if any.
+    pub fn clashes(&self, zone_id: &str, kind: &str, name: &str, id: Option<&str>) -> Result<(), CfError> {
+        if !addressing(kind) {
+            return Ok(());
+        }
+        let clash = self.at(zone_id).iter().any(|r| {
+            Some(r.id.as_str()) != id
+                && addressing(&r.kind)
+                && same_name(&r.name, name)
+                && (kind == "CNAME" || r.kind == "CNAME")
+        });
+        if clash {
+            return Err(CfError::Refused(
+                "An A, AAAA, or CNAME record with that host already exists.".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Fake {
@@ -252,6 +283,7 @@ impl Cloudflare for Fake {
         if self.dns(zone_id) != Dns::Edit {
             return Err(Self::denied());
         }
+        self.clashes(zone_id, &r.kind, &r.name, None)?;
         let made = Record {
             id: self.id("r"),
             kind: r.kind.clone(),
@@ -284,10 +316,15 @@ impl Cloudflare for Fake {
             return Err(Self::denied());
         }
         let mut rs = self.records.lock().unwrap();
-        let before = rs.len();
-        rs.retain(|(z, r)| !(z == zone_id && r.id == id));
-        if rs.len() == before {
+        let Some(i) = rs.iter().position(|(z, r)| z == zone_id && r.id == id) else {
             return Err(CfError::NotFound);
+        };
+        let (_, gone) = rs.remove(i);
+        let left = rs
+            .iter()
+            .any(|(z, r)| z == zone_id && addressing(&r.kind) && same_name(&r.name, &gone.name));
+        if addressing(&gone.kind) && !left {
+            self.emptied.lock().unwrap().push(gone.name);
         }
         Ok(())
     }
@@ -578,6 +615,36 @@ async fn never_overwrites_without_being_asked() {
 }
 
 #[tokio::test]
+async fn replacing_edits_one_record_in_place_so_the_name_keeps_answering() {
+    let cname = rec("c1", "CNAME", "shop.example.com", "old.example.net", None);
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)]).with("z1", cname.clone());
+    let o = ensure(&cf, "z1", "shop.example.com", "203.0.113.7", false, true, MARK)
+        .await
+        .unwrap();
+    assert_eq!(o.status, "created");
+    assert_eq!(o.replaced, vec![cname]);
+    let r = o.record.unwrap();
+    assert_eq!(
+        (r.id.as_str(), r.kind.as_str(), r.content.as_str(), r.comment.as_deref()),
+        ("c1", "A", "203.0.113.7", Some(MARK))
+    );
+    assert!(cf.emptied().is_empty());
+    // Several: the others go first, one A stays until it's edited.
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)])
+        .with("z1", rec("v1", "AAAA", "shop.example.com", "2001:db8::1", None))
+        .with("z1", rec("a1", "A", "shop.example.com", "198.51.100.9", None));
+    let o = ensure(&cf, "z1", "shop.example.com", "203.0.113.7", false, true, MARK)
+        .await
+        .unwrap();
+    assert_eq!((o.status, o.replaced.len()), ("created", 2));
+    let now = cf.at("z1");
+    assert_eq!(now.len(), 1);
+    assert_eq!((now[0].id.as_str(), now[0].content.as_str()), ("a1", "203.0.113.7"));
+    assert!(cf.emptied().is_empty());
+    assert!(!cf.calls().iter().any(|c| c.starts_with("create")));
+}
+
+#[tokio::test]
 async fn replacing_keeps_a_matching_record_and_other_types() {
     let same = rec("s", "A", "shop.example.com", "203.0.113.7", None);
     let v6 = rec("v", "AAAA", "shop.example.com", "2001:db8::1", None);
@@ -837,6 +904,7 @@ impl tunnel::TunnelApi for Fake {
         if self.dns(zone_id) != Dns::Edit {
             return Err(Self::denied());
         }
+        self.clashes(zone_id, &r.kind, &r.name, None)?;
         let made = Record {
             id: self.id("r"),
             ..r.record()
@@ -847,6 +915,30 @@ impl tunnel::TunnelApi for Fake {
             .unwrap()
             .push((zone_id.into(), made.clone()));
         Ok(made)
+    }
+
+    async fn overwrite(&self, zone_id: &str, id: &str, r: &Kept) -> Result<Record, CfError> {
+        self.log(format!(
+            "overwrite {zone_id} {id} {} {} {}",
+            r.kind, r.name, r.content
+        ));
+        if self.dns(zone_id) != Dns::Edit {
+            return Err(Self::denied());
+        }
+        self.clashes(zone_id, &r.kind, &r.name, Some(id))?;
+        let mut rs = self.records.lock().unwrap();
+        let Some((_, rec)) = rs.iter_mut().find(|(z, x)| z == zone_id && x.id == id) else {
+            return Err(CfError::NotFound);
+        };
+        // Everything as sent, the id as it was. No comment sent: none.
+        *rec = Record {
+            id: id.to_owned(),
+            ..r.record()
+        };
+        let out = rec.clone();
+        drop(rs);
+        self.ttls.lock().unwrap().insert(id.to_owned(), r.ttl);
+        Ok(out)
     }
 
     async fn tunnels_named(&self, account: &str, name: &str) -> Result<Vec<Tunnel>, CfError> {

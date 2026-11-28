@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
 use super::{
-    CfError, Cloudflare, Http, NewRecord, Record, delete_ours, install_id, marker, ours,
+    CfError, Cloudflare, Http, Record, delete_ours, in_place_rank, install_id, marker, ours,
     same_name,
     tunnel::{self, Kept, OriginCert, Tunnel, TunnelApi},
     zone_for,
@@ -800,40 +800,55 @@ pub(crate) async fn switch_record<C: Cloudflare + TunnelApi>(
     if !theirs.is_empty() && !replace {
         return Ok(Switched::Confirm(theirs.iter().map(|k| k.record()).collect()));
     }
-    for k in &others {
+    let previous: Vec<Kept> = theirs.into_iter().cloned().collect();
+    let cname = Kept {
+        id: String::new(),
+        kind: "CNAME".into(),
+        name: host.to_owned(),
+        content: target.to_owned(),
+        proxied: true,
+        ttl: 1,
+        comment: Some(mark.to_owned()),
+    };
+    // The name always keeps a record: one record stays and is edited into
+    // the CNAME in place, the others go first (a CNAME can't share the
+    // name with them). docs/cloudflare-tunnel.md §6.1.
+    let keep = have.as_ref().map(|r| r.id.clone()).or_else(|| in_place(&others).map(|k| k.id.clone()));
+    for k in others.iter().filter(|k| keep.as_deref() != Some(k.id.as_str())) {
         match cf.delete(zone_id, &k.id).await {
             Ok(()) | Err(CfError::NotFound) => {}
             Err(e) => return Err(e),
         }
     }
-    let previous: Vec<Kept> = theirs.into_iter().cloned().collect();
-    let record = match have {
-        Some(r) if r.proxied => r,
-        Some(r) => {
+    let record = match (have, keep) {
+        (Some(r), _) if r.proxied => r,
+        (Some(r), _) => {
             cf.set_proxied(zone_id, &r.id, true).await?;
             Record { proxied: true, ..r }
         }
-        None => {
-            cf.create(
-                zone_id,
-                &NewRecord {
-                    kind: "CNAME".into(),
-                    name: host.to_owned(),
-                    content: target.to_owned(),
-                    proxied: true,
-                    comment: mark.to_owned(),
-                },
-            )
-            .await?
-        }
+        (None, Some(id)) => match cf.overwrite(zone_id, &id, &cname).await {
+            // Gone meanwhile: the name is free, so made new.
+            Err(CfError::NotFound) => cf.create_kept(zone_id, &cname).await?,
+            r => r?,
+        },
+        (None, None) => cf.create_kept(zone_id, &cname).await?,
     };
     Ok(Switched::Done { record, previous })
 }
 
-/// Point `host` back: Pyo's CNAME goes (only if it's still Pyo's), then
-/// the kept records come back as they were. With none kept, `fallback`
-/// (an A record to the cluster's public IP) is made instead, when given.
-/// The record Pyo made, if any.
+/// Which of the records at a name to edit in place ([`in_place_rank`]).
+fn in_place<'a>(records: &[&'a Kept]) -> Option<&'a Kept> {
+    records
+        .iter()
+        .copied()
+        .min_by_key(|k| in_place_rank(&k.kind, k.proxied))
+}
+
+/// Point `host` back. Pyo's CNAME (only if it's still Pyo's) is edited in
+/// place into the first kept record, and the other kept records are made
+/// again as they were. With none kept, it becomes `fallback` (an A record
+/// to the cluster's public IP) when given, else it goes. The name never
+/// goes without a record on the way. The record Pyo made, if any.
 pub(crate) async fn revert_record<C: Cloudflare + TunnelApi>(
     cf: &C,
     zone_id: &str,
@@ -843,31 +858,51 @@ pub(crate) async fn revert_record<C: Cloudflare + TunnelApi>(
     fallback: Option<&str>,
     mark: &str,
 ) -> Result<Option<Record>, CfError> {
-    if let Some(id) = record_id {
-        delete_ours(cf, zone_id, id, host, mark).await?;
+    let mine = match record_id {
+        Some(id) => match cf.record(zone_id, id).await {
+            Ok(r) if ours(&r, mark, host) => Some(r),
+            Ok(_) | Err(CfError::NotFound) => None,
+            Err(e) => return Err(e),
+        },
+        None => None,
+    };
+    let fallback = fallback.filter(|_| previous.is_empty()).map(|ip| Kept {
+        id: String::new(),
+        kind: "A".into(),
+        name: host.to_owned(),
+        content: ip.to_owned(),
+        proxied: false,
+        ttl: 1,
+        comment: Some(mark.to_owned()),
+    });
+    let kept: Vec<&Kept> = previous.iter().collect();
+    let first = in_place(&kept).or(fallback.as_ref());
+    let mut made = None;
+    match (&mine, first) {
+        (Some(m), Some(f)) => {
+            made = Some(match cf.overwrite(zone_id, &m.id, f).await {
+                Err(CfError::NotFound) => cf.create_kept(zone_id, f).await?,
+                r => r?,
+            });
+        }
+        // Nothing to put back: Pyo's CNAME just goes.
+        (Some(m), None) => match cf.delete(zone_id, &m.id).await {
+            Ok(()) | Err(CfError::NotFound) => {}
+            Err(e) => return Err(e),
+        },
+        (None, _) => {}
     }
-    for k in previous {
+    for k in &kept {
+        if mine.is_some() && first.is_some_and(|f| std::ptr::eq(f, *k)) {
+            continue;
+        }
         cf.create_kept(zone_id, k).await?;
     }
-    if !previous.is_empty() {
-        return Ok(None);
+    if let (None, Some(f)) = (&mine, &fallback) {
+        made = Some(cf.create_kept(zone_id, f).await?);
     }
-    let Some(ip) = fallback else {
-        return Ok(None);
-    };
-    Ok(Some(
-        cf.create(
-            zone_id,
-            &NewRecord {
-                kind: "A".into(),
-                name: host.to_owned(),
-                content: ip.to_owned(),
-                proxied: false,
-                comment: mark.to_owned(),
-            },
-        )
-        .await?,
-    ))
+    // Only the fallback is Pyo's own record: a kept one is someone else's again.
+    Ok(made.filter(|_| previous.is_empty()))
 }
 
 /// A record row waiting for the loop.

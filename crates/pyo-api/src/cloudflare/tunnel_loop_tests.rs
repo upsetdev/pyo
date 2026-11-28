@@ -221,6 +221,179 @@ async fn a_cname_to_an_old_tunnel_is_repointed() {
     let now = cf.at("z1");
     assert_eq!(now.len(), 1);
     assert_eq!(now[0].content, TARGET);
+    assert_eq!(now[0].id, "c1", "repointed in place");
+    assert!(cf.emptied().is_empty());
+}
+
+/// The calls that changed records, in order.
+fn writes(cf: &Fake) -> Vec<String> {
+    cf.calls()
+        .into_iter()
+        .filter(|c| ["create", "overwrite", "delete", "proxy"].iter().any(|w| c.starts_with(w)))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_name_never_goes_without_a_record() {
+    // Someone's proxied A and AAAA and an MX: the AAAA goes first (a CNAME
+    // can't share the name), then the A becomes the CNAME in place.
+    let mut a = rec("a1", "A", "blog.example.com", "198.51.100.9", Some("by hand"));
+    a.proxied = true;
+    let mut v6 = rec("v1", "AAAA", "blog.example.com", "2001:db8::9", None);
+    v6.proxied = true;
+    let mx = rec("x1", "MX", "blog.example.com", "mail.example.com", None);
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)])
+        .with("z1", v6.clone())
+        .with("z1", a.clone())
+        .with("z1", mx.clone());
+    cf.ttls.lock().unwrap().insert("v1".into(), 600);
+    let Switched::Done { record, previous } =
+        switch_record(&cf, "z1", "blog.example.com", TARGET, true, MARK)
+            .await
+            .unwrap()
+    else {
+        panic!("not switched")
+    };
+    assert_eq!(record.id, "a1", "the A became the CNAME");
+    assert_eq!(
+        (record.kind.as_str(), record.content.as_str(), record.proxied, record.comment.as_deref()),
+        ("CNAME", TARGET, true, Some(MARK))
+    );
+    assert_eq!(
+        writes(&cf),
+        ["delete z1 v1".to_owned(), format!("overwrite z1 a1 CNAME blog.example.com {TARGET}")]
+    );
+    assert_eq!(previous.len(), 2, "both kept: {previous:?}");
+    assert!(cf.emptied().is_empty(), "{:?}", cf.emptied());
+
+    // Back: the CNAME becomes the A in place, then the AAAA is made again.
+    revert_record(&cf, "z1", "blog.example.com", Some(&record.id), &previous, None, MARK)
+        .await
+        .unwrap();
+    assert!(cf.emptied().is_empty(), "{:?}", cf.emptied());
+    let mut back = cf.at("z1");
+    back.sort_by(|x, y| x.kind.cmp(&y.kind));
+    assert_eq!(back.len(), 3);
+    assert_eq!(back[0], a, "the A, as it was, with its own id");
+    assert_eq!(
+        (back[1].kind.as_str(), back[1].content.as_str(), back[1].proxied, back[1].comment.as_deref()),
+        ("AAAA", "2001:db8::9", true, None)
+    );
+    assert_eq!(cf.ttls.lock().unwrap().get(&back[1].id), Some(&600));
+    assert_eq!(back[2], mx);
+}
+
+#[tokio::test]
+async fn a_cname_in_the_way_is_edited_in_place_both_ways() {
+    let theirs = rec("c9", "CNAME", "blog.example.com", "shop.example.net", Some("by hand"));
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)]).with("z1", theirs.clone());
+    cf.ttls.lock().unwrap().insert("c9".into(), 300);
+    let Switched::Done { record, previous } =
+        switch_record(&cf, "z1", "blog.example.com", TARGET, true, MARK)
+            .await
+            .unwrap()
+    else {
+        panic!("not switched")
+    };
+    assert_eq!(record.id, "c9");
+    revert_record(&cf, "z1", "blog.example.com", Some(&record.id), &previous, Some("203.0.113.7"), MARK)
+        .await
+        .unwrap();
+    assert_eq!(cf.at("z1"), vec![theirs], "as it was, the public IP not used");
+    assert_eq!(cf.ttls.lock().unwrap().get("c9"), Some(&300));
+    assert!(writes(&cf).iter().all(|w| w.starts_with("overwrite")), "{:?}", writes(&cf));
+    assert!(cf.emptied().is_empty());
+}
+
+#[tokio::test]
+async fn several_dns_only_records_leave_one_answering() {
+    // DNS-only A, A and AAAA: an A stays (most visitors ask for A) until
+    // it becomes the CNAME. The other two go first.
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)])
+        .with("z1", rec("v1", "AAAA", "blog.example.com", "2001:db8::9", None))
+        .with("z1", rec("a1", "A", "blog.example.com", "198.51.100.9", None))
+        .with("z1", rec("a2", "A", "blog.example.com", "198.51.100.10", None));
+    let Switched::Done { record, previous } =
+        switch_record(&cf, "z1", "blog.example.com", TARGET, true, MARK)
+            .await
+            .unwrap()
+    else {
+        panic!("not switched")
+    };
+    assert_eq!(record.id, "a1");
+    let w = writes(&cf);
+    assert_eq!(w.len(), 3, "{w:?}");
+    assert!(w[..2].iter().all(|c| c.starts_with("delete")) && w[2].starts_with("overwrite z1 a1 CNAME"), "{w:?}");
+    assert!(cf.emptied().is_empty());
+    assert_eq!(previous.len(), 3);
+    revert_record(&cf, "z1", "blog.example.com", Some(&record.id), &previous, None, MARK)
+        .await
+        .unwrap();
+    assert!(cf.emptied().is_empty());
+    let mut back: Vec<(String, String)> = cf.at("z1").into_iter().map(|r| (r.kind, r.content)).collect();
+    back.sort();
+    assert_eq!(
+        back,
+        [
+            ("A".to_owned(), "198.51.100.10".to_owned()),
+            ("A".to_owned(), "198.51.100.9".to_owned()),
+            ("AAAA".to_owned(), "2001:db8::9".to_owned())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn switching_back_to_the_public_ip_edits_pyos_cname_in_place() {
+    let mine = rec("m1", "A", "blog.example.com", "203.0.113.7", Some(MARK));
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)]).with("z1", mine);
+    let Switched::Done { record, previous } =
+        switch_record(&cf, "z1", "blog.example.com", TARGET, false, MARK)
+            .await
+            .unwrap()
+    else {
+        panic!("not switched")
+    };
+    assert_eq!(record.id, "m1", "Pyo's own A became the CNAME");
+    assert!(previous.is_empty());
+    let made = revert_record(&cf, "z1", "blog.example.com", Some(&record.id), &[], Some("203.0.113.7"), MARK)
+        .await
+        .unwrap()
+        .expect("Pyo's A record");
+    assert_eq!(
+        (made.id.as_str(), made.kind.as_str(), made.content.as_str(), made.proxied, made.comment.as_deref()),
+        ("m1", "A", "203.0.113.7", false, Some(MARK))
+    );
+    assert!(writes(&cf).iter().all(|w| w.starts_with("overwrite")), "{:?}", writes(&cf));
+    assert!(cf.emptied().is_empty());
+}
+
+#[tokio::test]
+async fn a_record_gone_meanwhile_is_made_new() {
+    // Listed, then deleted by hand before Pyo's edit: the name is free.
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)]);
+    let gone = Kept {
+        id: "g1".into(),
+        kind: "CNAME".into(),
+        name: "blog.example.com".into(),
+        content: TARGET.into(),
+        proxied: true,
+        ttl: 1,
+        comment: Some(MARK.into()),
+    };
+    assert_eq!(cf.overwrite("z1", "g1", &gone).await, Err(CfError::NotFound));
+    // Switching back when Pyo's CNAME is already gone: the kept record is made.
+    let kept = Kept {
+        comment: Some("by hand".into()),
+        kind: "A".into(),
+        content: "198.51.100.9".into(),
+        proxied: false,
+        ..gone
+    };
+    revert_record(&cf, "z1", "blog.example.com", Some("g1"), std::slice::from_ref(&kept), None, MARK)
+        .await
+        .unwrap();
+    let now = cf.at("z1");
+    assert_eq!((now.len(), now[0].content.as_str()), (1, "198.51.100.9"));
 }
 
 #[tokio::test]
