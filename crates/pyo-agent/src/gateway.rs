@@ -773,6 +773,18 @@ fn older_form(o: &Value) -> Option<Vec<Value>> {
     }
 }
 
+/// Said when the install refuses a country rule behind Cloudflare or
+/// through the tunnel ([`country_by_header`]).
+pub const COUNTRY_HEADER_REFUSED: &str = "This cluster's install is older than Pyo's, so country rules can't apply to domains behind Cloudflare or through Cloudflare Tunnel yet. Run the command under Refresh this cluster in the cluster's settings, then deploy again.";
+
+/// A SecurityPolicy with a country rule as Cloudflare's header
+/// (firewall.rs `COUNTRY_HEADER`).
+fn country_by_header(o: &Value) -> bool {
+    o["spec"]["authorization"]["rules"]
+        .as_array()
+        .is_some_and(|rules| rules.iter().any(|r| r["principal"]["headers"].is_array()))
+}
+
 /// An HTTPS Gateway's anchor route or its policies (`<gateway>-anchor`).
 fn is_anchor(o: &Value) -> bool {
     let Some(gateway) = o["metadata"]["name"].as_str().and_then(|n| n.strip_suffix("-anchor")) else {
@@ -1043,6 +1055,9 @@ pub async fn apply(
         notes.push(p.clone());
     }
     let mut r = route_objects(spec);
+    // The routes the service has now: the ones it gets new below must be
+    // taken before these go (`new_routes_taken`).
+    let routes_before = route_names(client, &spec.service.service_id).await;
     // Behind a CDN, or through the tunnel: its HTTPS client policy as the
     // cluster's websites have theirs otherwise. The tunnel's trusts its
     // connectors' pods as they are now.
@@ -1168,6 +1183,14 @@ pub async fn apply(
                 }
                 continue;
             }
+            // An install older than this agent refuses a country rule as
+            // Cloudflare's header (behind Cloudflare, through the tunnel).
+            // Leaving it out would let in whom it blocks: the deploy stops
+            // here, its routes as they were, and it says what to run.
+            Err(e) if kind == "SecurityPolicy" && country_by_header(o) && crate::refused::is_refusal(&e) => {
+                tracing::warn!(error = %e, name = %name, "the install refuses a country rule through Cloudflare");
+                return Err(anyhow::anyhow!(COUNTRY_HEADER_REFUSED));
+            }
             // An install older than this agent doesn't know the tunnel's
             // policy: the rest of the routes still go on, and it's said.
             Err(e) if tunnel_policy && crate::refused::is_refusal(&e) => {
@@ -1204,7 +1227,14 @@ pub async fn apply(
     for old in before.iter().filter(|s| !r.secrets.contains(s)) {
         let _ = secrets.delete(old, &DeleteParams::default()).await;
     }
-    remove_stale(client, &spec.service.service_id, &wanted, &r.secrets).await;
+    // Make before break: the old routes go once Envoy Gateway serves the
+    // new ones. Else they stay for the next sync.
+    if new_routes_taken(client, &spec.service.service_id, &wanted, &routes_before).await {
+        remove_stale(client, &spec.service.service_id, &wanted, &r.secrets).await;
+    } else {
+        tracing::warn!(service = %spec.service.service_id, "the gateway hasn't taken the new routes: the old ones stay");
+        notes.push(ROUTES_WAITING.into());
+    }
     // The firewall on UDP ports: the proxy pods' network policy.
     // (The details go to the agent's log; the deploy's log says it plainly.)
     if let Err(e) = crate::firewall::proxy_policy(client).await {
@@ -1586,15 +1616,20 @@ const SERVICE_KINDS: [&str; 10] = [
 ];
 
 /// A cert-manager Certificate whose Secret name is about to hold an
-/// uploaded certificate: deleted, its dependents first (the Secret, which
-/// cert-manager makes it own), and waited for; then the Secret by name, in
-/// case it was made before Certificates owned theirs.
+/// uploaded certificate: deleted and waited for, its Secret orphaned. The
+/// Secret stays, so the HTTPS listener that names it keeps serving, and the
+/// caller writes the uploaded certificate over it at once. Deleting the
+/// Secret first left the listener without one for seconds: new HTTPS
+/// connections to the domain failed (measured in the traffic test, as a
+/// domain moved to Cloudflare Tunnel). Kubernetes takes the Certificate's
+/// owner reference off the Secret as it orphans it, so neither cert-manager
+/// nor the Certificate's deletion takes the uploaded one.
 async fn retire_certificate(client: &Client, name: &str) -> anyhow::Result<()> {
     let certs = api_of(client, "Certificate");
     if certs.get_opt(name).await?.is_none() {
         return Ok(());
     }
-    match certs.delete(name, &DeleteParams::foreground()).await {
+    match certs.delete(name, &DeleteParams::orphan()).await {
         Ok(_) => {}
         Err(kube::Error::Api(e)) if e.code == 404 => {}
         Err(e) => return Err(e.into()),
@@ -1605,13 +1640,103 @@ async fn retire_certificate(client: &Client, name: &str) -> anyhow::Result<()> {
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    match Api::<Secret>::namespaced(client.clone(), GATEWAY_NS)
-        .delete(name, &DeleteParams::default())
+    Ok(())
+}
+
+/// Said when the old routes stay because the new ones weren't taken in time.
+pub const ROUTES_WAITING: &str = "The gateway hasn't taken this service's new routes yet. Its old routes keep answering until it has.";
+
+/// How long the old routes wait for the new ones to be taken.
+#[cfg(not(test))]
+const ROUTES_TAKEN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const ROUTES_TAKEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// After the new routes are taken, before the old ones go: Envoy Gateway
+/// writes a route's status apart from sending it to the proxies, so the
+/// proxies may not have it yet (one probe still got a 404 in the traffic
+/// test without this).
+#[cfg(not(test))]
+const ROUTES_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+const ROUTES_SETTLE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The names of a service's HTTPRoutes.
+async fn route_names(client: &Client, service_id: &str) -> std::collections::BTreeSet<String> {
+    api_of(client, "HTTPRoute")
+        .list(&ListParams::default().labels(&format!("{SERVICE_LABEL}={service_id}")))
         .await
-    {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
-        Err(e) => Err(e.into()),
+        .map(|l| l.items.iter().map(|o| o.name_any()).collect())
+        .unwrap_or_default()
+}
+
+/// Whether Envoy Gateway took a route: each of its parents says Accepted
+/// and ResolvedRefs.
+pub fn route_accepted(o: &Value) -> bool {
+    o["status"]["parents"].as_array().is_some_and(|ps| {
+        !ps.is_empty()
+            && ps.iter().all(|p| {
+                let ok = |t: &str| {
+                    p["conditions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|c| c["type"] == t && c["status"] == "True")
+                };
+                ok("Accepted") && ok("ResolvedRefs")
+            })
+    })
+}
+
+/// Make before break: when a service's routes are renamed (a domain going
+/// through the tunnel, or only through it), its old routes may go only
+/// once Envoy Gateway took the new ones. Deleting them at once let it see
+/// the old gone before the new one was in, and the domain answered 404 for
+/// about a second (measured in the traffic test). Only while Envoy Gateway
+/// runs, which the old routes' own status shows: nothing waits for a
+/// status nobody writes. False when the new routes weren't taken in time.
+async fn new_routes_taken(
+    client: &Client,
+    service_id: &str,
+    wanted: &BTreeMap<(String, String), ()>,
+    before: &std::collections::BTreeSet<String>,
+) -> bool {
+    let api = api_of(client, "HTTPRoute");
+    let Ok(list) = api
+        .list(&ListParams::default().labels(&format!("{SERVICE_LABEL}={service_id}")))
+        .await
+    else {
+        return true;
+    };
+    let wanted_route = |n: &str| wanted.contains_key(&("HTTPRoute".to_owned(), n.to_owned()));
+    let serving_stale = list.items.iter().any(|o| {
+        !wanted_route(&o.name_any()) && route_accepted(&serde_json::to_value(o).unwrap_or_default())
+    });
+    let new: Vec<&str> = wanted
+        .keys()
+        .filter(|(k, n)| k == "HTTPRoute" && !before.contains(n))
+        .map(|(_, n)| n.as_str())
+        .collect();
+    if !serving_stale || new.is_empty() {
+        return true;
+    }
+    let deadline = tokio::time::Instant::now() + ROUTES_TAKEN_WAIT;
+    loop {
+        let mut all = true;
+        for n in &new {
+            let taken = match api.get_opt(n).await {
+                Ok(Some(o)) => route_accepted(&serde_json::to_value(&o).unwrap_or_default()),
+                _ => false,
+            };
+            all &= taken;
+        }
+        if all {
+            tokio::time::sleep(ROUTES_SETTLE).await;
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
@@ -2577,14 +2702,27 @@ pub fn without_headers(o: &Value) -> Option<Value> {
     Some(older)
 }
 
+/// A client policy that removes visitor headers but not Envoy Gateway's
+/// own (`x-eg-internal-*`, system.rs `INTERNAL_HEADER_PREFIX`): the shape
+/// an install from before that accepts.
+pub fn without_internal(o: &Value) -> Option<Value> {
+    o["spec"]["headers"]["earlyRequestHeaders"].get("removeOnMatch")?;
+    let mut older = o.clone();
+    older["spec"]["headers"]["earlyRequestHeaders"]
+        .as_object_mut()?
+        .remove("removeOnMatch");
+    Some(older)
+}
+
 /// Write a ClientTrafficPolicy. When the cluster's install refuses one
 /// that removes visitor headers (its admission policy is older than this
-/// agent's, and the cluster can't refresh it), it's written without them,
-/// as that install accepts, so routes, certificates and the rest still go
-/// on. That's said once ([`HEADERS_KEPT`]) and reported until such a
-/// write goes through.
+/// agent's, and the cluster can't refresh it), it's written as that
+/// install accepts: without removing Envoy Gateway's own headers, else
+/// without its `headers` at all. So routes, certificates and the rest
+/// still go on. That's said once ([`HEADERS_KEPT`]) and reported until
+/// such a write goes through.
 async fn write_client_policy(api: &Api<DynamicObject>, name: &str, o: &Value) -> kube::Result<()> {
-    let refused = match api.patch(name, &pp(), &Patch::Apply(o)).await {
+    let first = match api.patch(name, &pp(), &Patch::Apply(o)).await {
         Ok(_) => {
             if o["spec"].get("headers").is_some() {
                 KEPT.store(false, Ordering::Relaxed);
@@ -2593,14 +2731,26 @@ async fn write_client_policy(api: &Api<DynamicObject>, name: &str, o: &Value) ->
         }
         Err(e) => e,
     };
-    let Some(older) = without_headers(o).filter(|_| crate::refused::is_refusal(&refused)) else {
-        return Err(refused);
-    };
-    api.patch(name, &pp(), &Patch::Apply(&older)).await?;
-    if !KEPT.swap(true, Ordering::Relaxed) {
-        tracing::warn!(policy = name, error = %refused, "{HEADERS_KEPT}");
+    let mut refused = first.to_string();
+    let mut last = first;
+    for older in [without_internal(o), without_headers(o)].into_iter().flatten() {
+        if !crate::refused::is_refusal(&last) {
+            break;
+        }
+        match api.patch(name, &pp(), &Patch::Apply(&older)).await {
+            Ok(_) => {
+                if !KEPT.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(policy = name, error = %refused, "{HEADERS_KEPT}");
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                refused = e.to_string();
+                last = e;
+            }
+        }
     }
-    Ok(())
+    Err(last)
 }
 
 /// A service's CDN client policy with these websites' settings, its CDN,
@@ -5377,6 +5527,125 @@ mod tests {
     /// first, so the uploaded Secret isn't taken with them. Needs a
     /// throwaway cluster with cert-manager and Pyo's issuers:
     /// KUBECONFIG=… cargo test -p pyo-agent -- --ignored gateway::tests::retires
+    /// An uploaded certificate taking a cert-manager certificate's Secret
+    /// name: the Certificate goes, the Secret never does, and the upload
+    /// is written over it.
+    #[tokio::test]
+    async fn an_upload_takes_a_certificates_secret_without_a_gap() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let name = format!("{TLS_SECRET_PREFIX}t-gap");
+        let cert = format!("apis/cert-manager.io/v1/namespaces/{GATEWAY_NS}/certificates/{name}");
+        let secret = format!("api/v1/namespaces/{GATEWAY_NS}/secrets/{name}");
+        kube.put(&cert, json!({ "apiVersion": "cert-manager.io/v1", "kind": "Certificate", "spec": { "secretName": name } }));
+        kube.put(&secret, json!({ "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls", "data": { "tls.crt": "bGU=", "tls.key": "bGU=" } }));
+        retire_certificate(&client, &name).await.unwrap();
+        assert!(kube.get(&cert).is_none(), "the Certificate goes");
+        assert!(kube.get(&secret).is_some(), "the listener's Secret stays");
+        // Nothing to retire: fine.
+        retire_certificate(&client, "pyo-tls-t-none").await.unwrap();
+    }
+
+    fn accepted() -> Value {
+        json!({ "parents": [{ "parentRef": { "name": "shop-web" }, "conditions": [
+            { "type": "Accepted", "status": "True" }, { "type": "ResolvedRefs", "status": "True" } ] }] })
+    }
+
+    #[test]
+    fn a_route_is_taken_when_every_parent_accepts_it() {
+        assert!(route_accepted(&json!({ "status": accepted() })));
+        assert!(!route_accepted(&json!({})), "no status yet");
+        assert!(!route_accepted(&json!({ "status": { "parents": [] } })));
+        let mut half = accepted();
+        half["parents"][0]["conditions"][1]["status"] = json!("False");
+        assert!(!route_accepted(&json!({ "status": half })), "a reference not resolved");
+        let mut two = accepted();
+        two["parents"].as_array_mut().unwrap().push(json!({ "conditions": [{ "type": "Accepted", "status": "True" }] }));
+        assert!(!route_accepted(&json!({ "status": two })), "one parent without ResolvedRefs");
+    }
+
+    fn route_path(name: &str) -> String {
+        format!("apis/gateway.networking.k8s.io/v1/namespaces/{GATEWAY_NS}/httproutes/{name}")
+    }
+
+    /// A domain moving to the tunnel gets a route of another name: the old
+    /// one serves until Envoy Gateway took the new one, then goes.
+    #[tokio::test]
+    async fn a_renamed_route_goes_only_once_the_new_one_is_taken() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let old = route_path("shop-web-https-http");
+        kube.put(&old, json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+            "metadata": { "labels": { SERVICE_LABEL: "svc_web" } }, "spec": {}, "status": accepted() }));
+        let mut s = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
+        s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into();
+        let new = route_path("shop-web-switching-plain-http");
+        // Every route the service now has (the switching one, its anchor,
+        // plain HTTP): Envoy Gateway takes them a moment after they're
+        // written.
+        let routes: Vec<String> = route_objects(&s)
+            .objects
+            .iter()
+            .filter(|o| o["kind"] == "HTTPRoute")
+            .map(|o| route_path(o["metadata"]["name"].as_str().unwrap()))
+            .collect();
+        assert!(routes.contains(&new) && routes.len() > 1, "{routes:?}");
+        let k = kube.clone();
+        let o = old.clone();
+        let gateway = tokio::spawn(async move {
+            while routes.iter().any(|n| k.get(n).is_none()) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            let old_there = k.get(&o).is_some();
+            for n in &routes {
+                let mut r = k.get(n).unwrap();
+                r["status"] = accepted();
+                k.put(n, r);
+            }
+            old_there
+        });
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let notes = apply(&client, &pyo, &s).await.expect("the routes");
+        assert!(gateway.await.unwrap(), "the old route served until the new one was taken");
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(kube.get(&new).is_some());
+        assert!(kube.get(&old).is_none(), "then it goes");
+    }
+
+    /// The new route never taken (Envoy Gateway down, or refusing it): the
+    /// old one keeps answering, and it's said.
+    #[tokio::test]
+    async fn the_old_route_stays_while_the_new_one_isnt_taken() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let old = route_path("shop-web-https-http");
+        kube.put(&old, json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+            "metadata": { "labels": { SERVICE_LABEL: "svc_web" } }, "spec": {}, "status": accepted() }));
+        let mut s = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
+        s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into();
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let notes = apply(&client, &pyo, &s).await.expect("the routes");
+        assert_eq!(notes, [ROUTES_WAITING]);
+        assert!(kube.get(&old).is_some(), "the old route keeps answering");
+        assert!(kube.get(&route_path("shop-web-switching-plain-http")).is_some());
+        assert!(!ROUTES_WAITING.contains(';'));
+    }
+
+    /// No status on the old routes (nothing writes it): nothing waits.
+    #[tokio::test]
+    async fn without_envoy_gateways_status_nothing_waits() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let old = route_path("shop-web-https-http");
+        kube.put(&old, json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+            "metadata": { "labels": { SERVICE_LABEL: "svc_web" } }, "spec": {} }));
+        let mut s = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
+        s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into();
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let start = std::time::Instant::now();
+        let notes = apply(&client, &pyo, &s).await.expect("the routes");
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(start.elapsed() < ROUTES_TAKEN_WAIT);
+        assert!(kube.get(&old).is_none());
+    }
+
     #[tokio::test]
     #[ignore = "needs a throwaway Kubernetes API server"]
     async fn retires_a_certificate_before_an_upload_takes_its_name_on_a_cluster() {
@@ -5416,7 +5685,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(secrets.get_opt(&name).await.unwrap().is_none());
+        // The Secret stays for the listener, no longer owned.
+        let kept = secrets.get_opt(&name).await.unwrap().expect("the Secret stays");
+        assert!(kept.metadata.owner_references.unwrap_or_default().is_empty());
         let uploaded = json!({ "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls", "metadata": { "name": name, "namespace": GATEWAY_NS },
             "stringData": { "tls.crt": "", "tls.key": "" } });
         secrets
@@ -5977,6 +6248,61 @@ mod tests {
         kube.admit(|w| (w.plural == "clienttrafficpolicies").then(|| (500, "etcd timeout".into())));
         assert!(apply(&client, &pyo, &b).await.is_err());
         assert!(!headers_kept());
+    }
+
+    /// An install from before client policies removed Envoy Gateway's own
+    /// headers (`x-eg-internal-*`): it takes them with the visitor headers'
+    /// removal, so that's how they're written, and it's reported.
+    #[tokio::test]
+    async fn an_install_without_internal_headers_keeps_the_visitor_headers_removal() {
+        let _one = OLDER_INSTALL.lock().await;
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let at = |name: &str| format!("apis/gateway.envoyproxy.io/v1alpha1/namespaces/{GATEWAY_NS}/clienttrafficpolicies/{name}");
+        kube.admit(|w| {
+            let internal = w.body["spec"]["headers"]["earlyRequestHeaders"].get("removeOnMatch").is_some();
+            (w.method != "DELETE" && internal).then(|| (403, "ValidatingAdmissionPolicy 'pyo-agent' denied request".to_owned()))
+        });
+        write_web(&client, system::WebSettings::default()).await.expect("the gateway's settings");
+        for name in ["pyo-http", "pyo-https"] {
+            let p = kube.get(&at(name)).expect(name);
+            let early = &p["spec"]["headers"]["earlyRequestHeaders"];
+            assert_eq!(early["remove"], system::visitor_headers(&[])["earlyRequestHeaders"]["remove"], "{name}");
+            assert!(early.get("removeOnMatch").is_none(), "{name}");
+        }
+        assert!(headers_kept());
+
+        // The new install takes them whole.
+        kube.admit(|_| None);
+        write_web(&client, system::WebSettings::default()).await.unwrap();
+        assert_eq!(kube.get(&at("pyo-https")).unwrap()["spec"]["headers"], system::visitor_headers(&[]));
+        assert!(!headers_kept());
+    }
+
+    /// An install whose admission policy is older refuses a country rule
+    /// as Cloudflare's header (behind Cloudflare, through the tunnel): the
+    /// deploy stops with what to run, as leaving the rule out would let in
+    /// whom it blocks.
+    #[tokio::test]
+    async fn an_older_install_refusing_a_country_header_stops_the_deploy() {
+        let _one = OLDER_INSTALL.lock().await;
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        kube.admit(|w| {
+            let by_header = w.plural == "securitypolicies" && country_by_header(&w.body);
+            (w.method != "DELETE" && by_header).then(|| (403, "ValidatingAdmissionPolicy 'pyo-agent' denied request".to_owned()))
+        });
+        let mut t = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
+        t.domains[0].tunnel = pyo_proto::TUNNEL_ON.into();
+        t.firewall = Some(Firewall {
+            rules: vec![pyo_proto::firewall::FirewallRule { id: "fwr_1".into(), action: "block".into(), operator: "in".into(), sources: vec!["RU".into()], limit: None }],
+            ..Default::default()
+        });
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let e = apply(&client, &pyo, &t).await.expect_err("a country rule it refuses");
+        assert_eq!(e.to_string(), COUNTRY_HEADER_REFUSED);
+        assert!(kube.refused().iter().any(|w| w.plural == "securitypolicies" && country_by_header(&w.body)));
+        // The new install takes it.
+        kube.admit(|_| None);
+        apply(&client, &pyo, &t).await.expect("the tunnel domain's routes");
     }
 
     /// What a cluster still on 0.5.5's admission policy accepts of the
