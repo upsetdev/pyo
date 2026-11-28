@@ -56,6 +56,23 @@ function niceMax(v: number) {
   return step * 4;
 }
 
+/**
+ * The y-axis ticks from 0 to yMax: quarters, else halves, else just 0 and
+ * yMax. A split is skipped if two labels repeat, or if a format that shows
+ * whole numbers would round a tick (0.5 shown as "1"), so counts near 0
+ * get 0 and 1, not 0, 0, 1, 1, 1.
+ */
+export function yTicks(yMax: number, format: (v: number) => string) {
+  for (const parts of [4, 2]) {
+    const ticks = Array.from({ length: parts + 1 }, (_, i) => (yMax * i) / parts);
+    const labels = ticks.map(format);
+    const distinct = labels.every((l, i) => i === 0 || l !== labels[i - 1]);
+    const honest = ticks.every((t) => Number.isInteger(t) || format(t) !== format(Math.round(t)));
+    if (distinct && honest) return ticks;
+  }
+  return [0, yMax];
+}
+
 const tickTime = (at: number, spanMs: number) =>
   spanMs > 2 * 86_400_000
     ? new Date(at).toLocaleDateString("en-US", {
@@ -138,7 +155,7 @@ export function TimeSeriesChart({
   const x = (i: number) =>
     stacked ? (w / n) * (i + 0.5) : n <= 1 ? w / 2 : (w / (n - 1)) * i;
   const y = (v: number) => h - (v / yMax) * h;
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * yMax);
+  const ticks = yTicks(yMax, format);
   const xTickEvery = Math.max(
     1,
     Math.ceil(n / Math.max(2, Math.floor(w / 80))),
