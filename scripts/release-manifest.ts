@@ -39,11 +39,10 @@
 // they match this list, at /<script> for the latest release and at
 // /v/<version>/<script> for each one.
 //
-// `mirrors` lists the third-party images the release runs, from Pyo's
-// mirror (deploy/mirrors.txt, which the release copies there first), by
-// path and tag: "envoyproxy/envoy:distroless-v1.39.5" →
-// "ghcr.io/upsetdev/pyo-mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:…",
-// pinned by the source's digest.
+// `mirrors` lists the third-party images the release runs, from Docker
+// Hub (deploy/mirrors.txt), by path and tag: "envoyproxy/envoy:distroless-v1.39.5" →
+// "docker.io/envoyproxy/envoy:distroless-v1.39.5@sha256:…". The name is
+// older releases': they listed Pyo's copies of these images there.
 //
 // `verifier` lists the SHA-256 of the release's verifier for each
 // architecture (pyo-verify-linux-<arch>), read from the files in
@@ -154,19 +153,17 @@ for (const major of ["16", "17", "18"]) {
   pinned[`postgres${major}`] = postgres[`__IMAGES__/postgres:${major}-__TAG__`];
 }
 
-// Pyo's mirrors of third-party images (deploy/mirrors.txt): the mirror's
-// path is the source's without its registry and "library/", with the
-// source's digest. scripts/mirror-images.sh copies them the same way.
-const MIRROR = "ghcr.io/upsetdev/pyo-mirror";
+// The third-party images (deploy/mirrors.txt), keyed by their path on
+// Docker Hub without "library/".
 const mirrors: Record<string, string> = {};
 for (const line of readFileSync("deploy/mirrors.txt", "utf8").split("\n")) {
   const src = line.trim();
   if (!src || src.startsWith("#")) continue;
-  const m = src.match(/^[a-z0-9.-]+\.[a-z]+\/([a-z0-9._/-]+:[A-Za-z0-9._-]+)@(sha256:[0-9a-f]{64})$/);
-  if (!m) fail(`deploy/mirrors.txt: not <registry>/<path>:<tag>@sha256:<digest>: ${src}`);
+  const m = src.match(/^docker\.io\/([a-z0-9._/-]+:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$/);
+  if (!m) fail(`deploy/mirrors.txt: not docker.io/<path>:<tag>@sha256:<digest>: ${src}`);
   const path = m![1].replace(/^library\//, "");
   if (mirrors[path]) fail(`deploy/mirrors.txt lists ${path} twice`);
-  mirrors[path] = `${MIRROR}/${path}@${m![2]}`;
+  mirrors[path] = src;
 }
 if (!Object.keys(mirrors).length) fail("deploy/mirrors.txt lists no image");
 

@@ -899,7 +899,7 @@ spec:
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
       containers:
         - name: cloudflared
-          image: ghcr.io/upsetdev/pyo-mirror/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba
+          image: docker.io/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba
           args: [tunnel, --no-autoupdate, --protocol, http2, --grace-period, 20s, --metrics, 0.0.0.0:2000, --loglevel, info,
                  --config, /etc/pyo-tunnel/config.yml, run]
           volumeMounts: [{ name: config, mountPath: /etc/pyo-tunnel, readOnly: true }]

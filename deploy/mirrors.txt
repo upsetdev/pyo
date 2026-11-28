@@ -1,20 +1,17 @@
-# Third-party images Pyo runs, copied to ghcr.io/upsetdev/pyo-mirror so
-# installs never pull from Docker Hub, whose anonymous pulls are rate
-# limited. One source per line, by tag and digest:
+# Third-party images Pyo runs, pulled straight from Docker Hub and pinned
+# by tag and digest. One image per line:
 #
 #   docker.io/library/registry:3.1.2@sha256:…
-#   → ghcr.io/upsetdev/pyo-mirror/registry:3.1.2 (the same digest)
 #
-# The mirror's path is the source's without its registry and "library/".
-# scripts/mirror-images.sh copies them (all platforms, never rebuilt) and
-# checks each copy has the source's digest: on each release
-# (.github/workflows/mirror.yml), and on dev and main when this list
-# changes. release.json lists them under "mirrors". Code and manifests use
-# the mirror, pinned by the same digest; scripts/check-images.sh fails CI
-# when one isn't listed here or an image comes from elsewhere.
+# Code and manifests use each one exactly as written here.
+# scripts/check-images.sh fails CI when an image Pyo ships isn't listed
+# here with the same digest, when one listed isn't used, or when an image
+# comes from a registry not on its list. `check-images.sh upstream` checks
+# each digest is still at Docker Hub. release.json lists them under
+# "mirrors" (the name older releases gave the list).
 #
 # To add or bump one: change it here and where it's used, with the digest
-# of its multi-platform index as the source registry gives it.
+# of its multi-platform index as Docker Hub gives it.
 
 # Pyo's own registry, and the port forward to it (platform.yaml, connect.sh).
 docker.io/library/registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c

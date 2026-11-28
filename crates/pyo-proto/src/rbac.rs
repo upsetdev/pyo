@@ -2797,10 +2797,8 @@ mod tests {
         );
         assert_eq!(access_hash_of(&policy), h);
         // Whatever images the installation runs (third-party images the
-        // code pins are part of the rules, Pyo's mirrors of them too).
-        let text = json!(policy)
-            .to_string()
-            .replace("ghcr.io/upsetdev/pyo-mirror/", "");
+        // code pins are part of the rules).
+        let text = json!(policy).to_string();
         assert!(
             !text.contains("ghcr.io/upsetdev/") && !text.contains("127.0.0.1:5005"),
             "{text}"

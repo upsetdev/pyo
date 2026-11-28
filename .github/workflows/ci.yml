@@ -251,10 +251,9 @@ jobs:
           echo "::error::The lockfiles have $CRITICAL CRITICAL CVEs with a fix (see the job's summary). Update those dependencies, or add a CVE that doesn't apply to .trivyignore with the reason."
           exit 1
 
-  # Every image Pyo runs comes from Pyo's mirror (deploy/mirrors.txt) or an
-  # allowed registry, never Docker Hub, whose anonymous pulls are rate
-  # limited. Then each mirrored image's digest is still at its source
-  # (read only: nothing is copied here, mirror.yml does that).
+  # Every image Pyo runs comes from an allowed registry, and each
+  # third-party one from Docker Hub is listed in deploy/mirrors.txt with
+  # its digest. Then each listed digest is still at Docker Hub (read only).
   images:
     name: Image sources
     runs-on: ubuntu-24.04
@@ -262,11 +261,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Nothing from Docker Hub
+      - name: Every image is pinned and listed
         run: scripts/check-images.sh
       - uses: ./.github/actions/crane
-      - name: The mirrored digests are at their source
-        run: scripts/mirror-images.sh check
+      - name: The listed digests are at Docker Hub
+        run: scripts/check-images.sh upstream
 
   # cargo-deny, configured in deny.toml. RustSec advisories and crates
   # from anywhere but crates.io fail the check. Licenses and banned or
