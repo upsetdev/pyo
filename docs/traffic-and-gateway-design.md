@@ -1135,14 +1135,23 @@ this list wins.
     codes are letters only, so `T1` can't be named. With Cloudflare's IP
     geolocation off, the header is missing and no country rule matches
     ("is not in" rules then refuse everyone).
-  - Not yet run on a cluster (2026-11-28): the traffic e2e's tunnel leg
-    (`update-traffic-e2e.sh fast --dev` with the test zone, service
-    `geo`) checks block and "is not in" rules through the tunnel and
-    direct, with claimed countries. Its first run stopped at the update:
-    the admission policy's new clause had one `)` too many and the API
-    server refused the policy (fixed, and a unit test now checks every
-    expression's parentheses). The rerun waits for a free machine and a
-    signed-in password manager.
+  - Measured (`scripts/update-traffic-e2e.sh fast --dev` with the test
+    zone, one multipass server updated from 0.51.0 to this branch's
+    build, 2026-11-28), on service `geo` (no traffic), with Cloudflare
+    placing this machine in one country and AQ as the other:
+    - through the tunnel, a block of this machine's country refused it
+      (403), and so did claiming AQ in `CF-IPCountry` or
+      `x-eg-internal-geoip-country` (5 x 403 each). "Only this country"
+      let it in (200), a block of AQ let it in (5 x 200);
+    - direct (a private address, not in the database), a block of that
+      country let it in, "only AQ" refused it, and claiming AQ in
+      either header was still refused (5 x 403 each);
+    - all 15 checks ok. The step took 2,754 short requests to web, waf,
+      their tunnel domains and web's plain HTTP, 0 failed. The whole run:
+      0 failed short requests on every target.
+    The first run stopped at the update: the admission policy's new
+    clause had one `)` too many and the API server refused the policy.
+    Fixed, and a unit test now checks every expression's parentheses.
   - Trust is the same as for address rules behind Cloudflare: any
     Cloudflare request reaches a listener behind Cloudflare, including a
     Worker of another account that sets its own headers. The tunnel has
