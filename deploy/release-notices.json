@@ -3,6 +3,16 @@
   "minFrom": null,
   "manualOnly": true,
   "beforeYouUpdate": [
-    "Self-hosted sandbox servers stop taking commands after this update until an admin presses Update on each one and runs the command it shows on that server. Their sandboxes keep running."
+    "After updating, run the connect command shown in each cluster's settings.",
+    "Skip the cluster Pyo runs on. Its server runs the command by itself.",
+    "Pyo's Postgres, ClickHouse, backup store and registry restart once during the update. Pyo is down for a short time.",
+    "Your Postgres and KV databases restart once when their cluster gets this update.",
+    "Pyo Gateway restarts once on each server. Open WebSockets reconnect.",
+    "The Cloudflare Tunnel connector restarts once on each cluster that uses it.",
+    "The firewall restarts once on each server where a service uses it.",
+    "Each service's open WebSockets and streams drop once, the next time Pyo applies its routes. Plain HTTP and the tailnet drop once too.",
+    "Country rules on domains behind Cloudflare or through Cloudflare Tunnel use the country Cloudflare sends. Keep Cloudflare's IP geolocation on. If it's off, \"is not in\" rules there block everyone.",
+    "Self-hosted sandbox servers stop taking commands after this update until an admin presses Update on each one and runs the command it shows on that server. Their sandboxes keep running.",
+    "Node.js apps that don't pin a Node.js version build on Node.js 26 instead of 24 from their next deploy. To stay on 24, set engines.node in package.json."
   ]
 }
