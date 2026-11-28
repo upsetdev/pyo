@@ -4,7 +4,7 @@
 // output to the GitHub release:
 //
 //   bun run scripts/release-manifest.ts --version 0.1.0 \
-//     --images ghcr.io/upsetdev/pyo \
+//     --images ghcr.io/upsetdev \
 //     --pyo sha256:… --agent sha256:… --builder sha256:… --flows sha256:… --waf sha256:… --geoip sha256:… \
 //     --db-controller sha256:… --kv sha256:… --static sha256:… --mysql-operator sha256:… --mysql-backup sha256:… \
 //     --postgres-16 sha256:… --postgres-17 sha256:… --postgres-18 sha256:… \
@@ -14,7 +14,9 @@
 //     --sandbox-gvisor-x86_64 <sha256> --sandbox-gvisor-aarch64 <sha256> \
 //     --verifier verifier --scripts release-scripts > release.json
 //
-// Images are pinned by digest, each at the release's version as its tag.
+// Images are pinned by digest, each at the release's version as its tag,
+// under their flat names (deploy/pyo-images.json): --images
+// ghcr.io/upsetdev gives ghcr.io/upsetdev/pyo-agent:0.1.0@sha256:….
 // Two have a tag of their own, from scripts/image-tags.sh: geoip (its
 // database's date) and waf (a hash of its sources). Their tag, and so
 // their reference, changes only when the image does, so the pods that run
@@ -101,30 +103,23 @@ const ownTags: Record<string, string> = (() => {
 for (const name of ["geoip", "waf"]) {
   if (!ownTags[name]) fail(`scripts/image-tags.sh gave no tag for ${name}`);
 }
-const ref = (name: string) => {
-  const digest = need(name);
-  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) fail(`--${name} isn't a sha256 digest: ${digest}`);
-  return `${images}/${name}:${ownTags[name] ?? version}@${digest}`;
+// Pyo's own images (deploy/pyo-images.json): each one's flat name, its
+// name in the manifests (`__IMAGES__/<placeholder>:__TAG__`, also the
+// --<placeholder> flag) and its key in release.json. Postgres is one
+// repository with a tag per version, below. The sandbox templates' come
+// from elsewhere, below too.
+type OwnImage = { name: string; placeholder?: string; keys: string[]; builtBy?: string };
+const own: OwnImage[] = JSON.parse(readFileSync("deploy/pyo-images.json", "utf8")).images;
+const built = own.filter((i) => i.placeholder && !i.builtBy && i.placeholder !== "postgres");
+const repoOf = (placeholder: string) =>
+  own.find((i) => i.placeholder === placeholder)?.name ?? fail(`deploy/pyo-images.json has no ${placeholder}`);
+const ref = (placeholder: string) => {
+  const digest = need(placeholder);
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) fail(`--${placeholder} isn't a sha256 digest: ${digest}`);
+  return `${images}/${repoOf(placeholder)}:${ownTags[placeholder] ?? version}@${digest}`;
 };
-// Each image by its name in the manifests (`__IMAGES__/<name>:__TAG__`) and
-// its key in release.json.
-const names = {
-  pyo: "pyo",
-  agent: "agent",
-  builder: "builder",
-  flows: "flows",
-  waf: "waf",
-  geoip: "geoip",
-  "db-controller": "dbController",
-  kv: "kv",
-  static: "static",
-  // MySQL's operator and backup image: MOCO with Pyo's patches
-  // (deploy/images/moco).
-  "mysql-operator": "mysqlOperator",
-  "mysql-backup": "mysqlBackup",
-} as const;
-const byName: Record<string, string> = Object.fromEntries(Object.keys(names).map((n) => [n, ref(n)]));
-const pinned: Record<string, string> = Object.fromEntries(Object.entries(names).map(([n, key]) => [key, byName[n]]));
+const byName: Record<string, string> = Object.fromEntries(built.map((i) => [i.placeholder!, ref(i.placeholder!)]));
+const pinned: Record<string, string> = Object.fromEntries(built.map((i) => [i.keys[0], byName[i.placeholder!]]));
 // Pyo Sandbox's built-in templates `base` and `desktop` come from
 // upsetdev/pyo-sandbox-images, whose signed images.json Pyo reads itself
 // (crates/pyo-api/src/sandbox/images.rs). release.json still names the
@@ -149,7 +144,7 @@ const postgres: Record<string, string> = {};
 for (const major of ["16", "17", "18"]) {
   const digest = need(`postgres-${major}`);
   if (!/^sha256:[0-9a-f]{64}$/.test(digest)) fail(`--postgres-${major} isn't a sha256 digest: ${digest}`);
-  postgres[`__IMAGES__/postgres:${major}-__TAG__`] = `${images}/postgres:${major}-${version}@${digest}`;
+  postgres[`__IMAGES__/postgres:${major}-__TAG__`] = `${images}/${repoOf("postgres")}:${major}-${version}@${digest}`;
   pinned[`postgres${major}`] = postgres[`__IMAGES__/postgres:${major}-__TAG__`];
 }
 

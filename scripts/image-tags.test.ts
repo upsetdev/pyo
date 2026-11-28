@@ -80,7 +80,7 @@ test("release.json pins waf and geoip under their own tags", () => {
       "bun",
       "run",
       "scripts/release-manifest.ts",
-      ...["--version", version, "--images", "ghcr.io/upsetdev/pyo"],
+      ...["--version", version, "--images", "ghcr.io/upsetdev"],
       ...[...images, ...others].flatMap((i) => [`--${i}`, digest]),
       ...["--agent-access", "0123456789abcdef"],
       ...["--database-pins", JSON.stringify({ mysql: `ghcr.io/example/mysql:8@sha256:${sum}` })],
@@ -90,13 +90,16 @@ test("release.json pins waf and geoip under their own tags", () => {
     if (out.code !== 0) throw new Error(out.stderr);
     const release = JSON.parse(out.stdout);
     const tag = (image: string) => run(["bash", "scripts/image-tags.sh", image]).stdout.trim();
-    expect(release.images.waf).toBe(`ghcr.io/upsetdev/pyo/waf:${tag("waf")}@${digest}`);
-    expect(release.images.geoip).toBe(`ghcr.io/upsetdev/pyo/geoip:${tag("geoip")}@${digest}`);
-    expect(release.images.pyo).toBe(`ghcr.io/upsetdev/pyo/pyo:${version}@${digest}`);
+    expect(release.images.waf).toBe(`ghcr.io/upsetdev/pyo-waf:${tag("waf")}@${digest}`);
+    expect(release.images.geoip).toBe(`ghcr.io/upsetdev/pyo-geoip:${tag("geoip")}@${digest}`);
+    expect(release.images.pyo).toBe(`ghcr.io/upsetdev/pyo:${version}@${digest}`);
+    expect(release.images.agent).toBe(`ghcr.io/upsetdev/pyo-agent:${version}@${digest}`);
+    expect(release.images.postgres18).toBe(`ghcr.io/upsetdev/pyo-postgres:18-${version}@${digest}`);
+    expect(release.mirrors["registry:3.1.2"]).toMatch(/^docker\.io\/library\/registry:3\.1\.2@sha256:[0-9a-f]{64}$/);
     // The manifests hand Pyo and its worker the same two references.
     const manifests = JSON.stringify(release.manifests);
     for (const image of ["waf", "geoip"]) {
-      const refs = manifests.match(new RegExp(`ghcr\\.io/upsetdev/pyo/${image}:[^"]+`, "g")) ?? [];
+      const refs = manifests.match(new RegExp(`ghcr\\.io/upsetdev/pyo-${image}:[^"]+`, "g")) ?? [];
       expect(refs.length).toBeGreaterThan(0);
       expect(new Set(refs)).toEqual(new Set([release.images[image]]));
     }

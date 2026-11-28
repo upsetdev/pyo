@@ -1,0 +1,20 @@
+{
+  "registries": ["ghcr.io/upsetdev", "docker.io/upsetdev"],
+  "old": { "prefix": "ghcr.io/upsetdev/pyo", "until": "2027-03-01" },
+  "images": [
+    { "name": "pyo", "placeholder": "pyo", "keys": ["pyo"], "about": "Pyo's API, dashboard and workers" },
+    { "name": "pyo-agent", "placeholder": "agent", "keys": ["agent"], "about": "The agent on each cluster. Also runs updates" },
+    { "name": "pyo-builder", "placeholder": "builder", "keys": ["builder"], "about": "Builds services from Git and folders into images" },
+    { "name": "pyo-flows", "placeholder": "flows", "keys": ["flows"], "about": "Connection analytics collector, one per server" },
+    { "name": "pyo-waf", "placeholder": "waf", "keys": ["waf"], "about": "Web application firewall for Pyo Gateway (Coraza)" },
+    { "name": "pyo-geoip", "placeholder": "geoip", "keys": ["geoip"], "about": "GeoLite2 Country database for country rules" },
+    { "name": "pyo-db-controller", "placeholder": "db-controller", "keys": ["dbController"], "about": "Runs Pyo's built-in databases" },
+    { "name": "pyo-kv", "placeholder": "kv", "keys": ["kv"], "about": "REST API in front of a KV database (Valkey)" },
+    { "name": "pyo-static", "placeholder": "static", "keys": ["static"], "about": "Serves static sites" },
+    { "name": "pyo-postgres", "placeholder": "postgres", "keys": ["postgres16", "postgres17", "postgres18"], "about": "PostgreSQL 16, 17 and 18 for databases, tagged <major>-<version>" },
+    { "name": "pyo-mysql-operator", "placeholder": "mysql-operator", "keys": ["mysqlOperator"], "about": "MySQL operator (MOCO, patched)" },
+    { "name": "pyo-mysql-backup", "placeholder": "mysql-backup", "keys": ["mysqlBackup"], "about": "MySQL backups (MOCO, patched)" },
+    { "name": "pyo-sandbox-base", "keys": ["sandboxBase"], "about": "Sandbox template base (Ubuntu 24.04)", "builtBy": "upsetdev/pyo-sandbox-images", "publishedAs": "ghcr.io/upsetdev/pyo-sandbox-images/base" },
+    { "name": "pyo-sandbox-desktop", "keys": ["sandboxDesktop"], "about": "Sandbox template desktop (Ubuntu 24.04 with a desktop and a browser)", "builtBy": "upsetdev/pyo-sandbox-images", "publishedAs": "ghcr.io/upsetdev/pyo-sandbox-images/desktop" }
+  ]
+}

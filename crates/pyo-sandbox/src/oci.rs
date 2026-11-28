@@ -740,8 +740,8 @@ mod tests {
         );
         // As Pyo's release pins its images: the digest counts, not the tag.
         assert_eq!(
-            ImageRef::parse(&format!("ghcr.io/upsetdev/pyo/sandbox-base:0.4.1@{d}")).unwrap(),
-            r("ghcr.io", "upsetdev/pyo/sandbox-base", &d)
+            ImageRef::parse(&format!("ghcr.io/upsetdev/pyo-sandbox-base:0.4.1@{d}")).unwrap(),
+            r("ghcr.io", "upsetdev/pyo-sandbox-base", &d)
         );
         assert_eq!(
             ImageRef::parse(&format!("127.0.0.1:5000/pyo/x:e2e@{d}")).unwrap(),

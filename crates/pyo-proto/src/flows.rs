@@ -59,12 +59,18 @@ pub struct FlowBatch {
 }
 
 /// The collector's image for an agent image: same registry and tag, named
-/// `flows` (`…/pyo/agent:0.1.0` → `…/pyo/flows:0.1.0`). A digest-pinned
-/// agent image gives no flows image; the release pins that one itself.
+/// `flows` (`…/pyo/agent:dev` → `…/pyo/flows:dev`, a local build's) or
+/// `pyo-flows` (`…/pyo-agent:0.1.0` → `…/pyo-flows:0.1.0`, a release's
+/// flat name). A digest-pinned agent image gives no flows image; the
+/// release pins that one itself.
 pub fn flows_image_for(agent_image: &str) -> Option<String> {
     let (repo, rest) = agent_image.rsplit_once('/')?;
-    let tag = rest.strip_prefix("agent")?;
-    (!tag.contains('@')).then(|| format!("{repo}/flows{tag}"))
+    let (name, tag) = match rest.strip_prefix("pyo-agent") {
+        Some(tag) => ("pyo-flows", tag),
+        None => ("flows", rest.strip_prefix("agent")?),
+    };
+    (!tag.contains('@') && (tag.is_empty() || tag.starts_with(':')))
+        .then(|| format!("{repo}/{name}{tag}"))
 }
 
 #[cfg(test)]
@@ -78,8 +84,13 @@ mod tests {
             Some("127.0.0.1:5005/pyo/flows:dev")
         );
         assert_eq!(
-            flows_image_for("ghcr.io/upsetdev/pyo/agent:0.2.0@sha256:ab"),
+            flows_image_for("ghcr.io/upsetdev/pyo-agent:0.2.0").as_deref(),
+            Some("ghcr.io/upsetdev/pyo-flows:0.2.0")
+        );
+        assert_eq!(
+            flows_image_for("ghcr.io/upsetdev/pyo-agent:0.2.0@sha256:ab"),
             None
         );
+        assert_eq!(flows_image_for("ghcr.io/upsetdev/pyo-agentx:1"), None);
     }
 }

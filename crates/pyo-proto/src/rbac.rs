@@ -1890,7 +1890,7 @@ mod tests {
             "the configured image is pinned"
         );
         assert!(
-            !policy.contains("ghcr.io/upsetdev/pyo/waf"),
+            !policy.contains("ghcr.io/upsetdev/pyo-waf"),
             "not a built-in one"
         );
         assert_eq!(
@@ -2408,7 +2408,7 @@ mod tests {
     fn the_tunnel_connector_passes_the_pod_rules() {
         let d = system::tunnel_deployment(
             system::CLOUDFLARED_IMAGE,
-            Some("ghcr.io/upsetdev/pyo/agent:1.2.3"),
+            Some("ghcr.io/upsetdev/pyo-agent:1.2.3"),
             &system::tunnel_token_hash("tok"),
         );
         let pod = &d["spec"]["template"]["spec"];
@@ -2448,7 +2448,7 @@ mod tests {
         let gates = pod["initContainers"].as_array().unwrap();
         assert_eq!(gates.len(), 1);
         let g = &gates[0];
-        assert_eq!(g["image"], "ghcr.io/upsetdev/pyo/agent:1.2.3");
+        assert_eq!(g["image"], "ghcr.io/upsetdev/pyo-agent:1.2.3");
         assert_eq!(g["args"], json!([system::TUNNEL_GATE]));
         assert_eq!(g["securityContext"], c["securityContext"]);
         assert!(g.get("volumeMounts").is_none() && g.get("ports").is_none());
@@ -2635,7 +2635,7 @@ mod tests {
             "the configured image is pinned"
         );
         assert!(
-            !policy.contains("ghcr.io/upsetdev/pyo/geoip"),
+            !policy.contains("ghcr.io/upsetdev/pyo-geoip"),
             "not a built-in one"
         );
         assert_eq!(

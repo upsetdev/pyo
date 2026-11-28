@@ -1743,7 +1743,7 @@ impl Release {
         if self.manifests.pyo.is_empty() {
             out.push("It has no manifests for Pyo.".into());
         }
-        // Pyo's own images are named under one prefix, e.g. ghcr.io/upsetdev/pyo/.
+        // Pyo's own images are named under one prefix, e.g. ghcr.io/upsetdev/.
         let prefix = image_repo(&self.images.pyo)
             .rsplit_once('/')
             .map(|(p, _)| format!("{p}/"))
@@ -3344,8 +3344,17 @@ mod release_tests {
 
     const D: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    /// A flat name, as deploy/pyo-images.json has it: pyo, or pyo-<name>.
+    fn flat(n: &str) -> String {
+        if n == "pyo" {
+            n.into()
+        } else {
+            format!("pyo-{n}")
+        }
+    }
+
     fn release() -> Release {
-        let img = |n: &str| format!("ghcr.io/upsetdev/pyo/{n}:0.2.0@sha256:{D}");
+        let img = |n: &str| format!("ghcr.io/upsetdev/{}:0.2.0@sha256:{D}", flat(n));
         Release {
             version: "0.2.0".into(),
             images: ReleaseImages {
@@ -3360,9 +3369,9 @@ mod release_tests {
                 pyo_static: img("static"),
                 mysql_operator: img("mysql-operator"),
                 mysql_backup: img("mysql-backup"),
-                postgres16: img("postgres-16"),
-                postgres17: img("postgres-17"),
-                postgres18: img("postgres-18"),
+                postgres16: format!("ghcr.io/upsetdev/pyo-postgres:16-0.2.0@sha256:{D}"),
+                postgres17: format!("ghcr.io/upsetdev/pyo-postgres:17-0.2.0@sha256:{D}"),
+                postgres18: format!("ghcr.io/upsetdev/pyo-postgres:18-0.2.0@sha256:{D}"),
                 sandbox_base: format!("ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:{D}"),
                 sandbox_desktop: format!("ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:{D}"),
             },
@@ -3446,19 +3455,17 @@ mod release_tests {
 
     #[test]
     fn digests() {
-        assert!(pinned_image(&format!(
-            "ghcr.io/upsetdev/pyo/pyo@sha256:{D}"
-        )));
+        assert!(pinned_image(&format!("ghcr.io/upsetdev/pyo@sha256:{D}")));
         assert!(pinned_image(&format!(
             "127.0.0.1:5005/pyo/pyo:1@sha256:{D}"
         )));
-        assert!(!pinned_image("ghcr.io/upsetdev/pyo/pyo:0.2.0"));
+        assert!(!pinned_image("ghcr.io/upsetdev/pyo:0.2.0"));
         assert!(!pinned_image(&format!(
-            "ghcr.io/upsetdev/pyo/pyo@sha256:{}",
+            "ghcr.io/upsetdev/pyo@sha256:{}",
             &D[1..]
         )));
         assert!(!pinned_image(&format!(
-            "ghcr.io/upsetdev/pyo/pyo@sha256:{}",
+            "ghcr.io/upsetdev/pyo@sha256:{}",
             D.to_uppercase()
         )));
         assert_eq!(
@@ -3483,7 +3490,7 @@ mod release_tests {
     #[test]
     fn releases_must_pin_their_images() {
         let mut r = release();
-        r.images.agent = "ghcr.io/upsetdev/pyo/agent:0.2.0".into();
+        r.images.agent = "ghcr.io/upsetdev/pyo-agent:0.2.0".into();
         assert!(
             r.problems()
                 .iter()
@@ -3492,7 +3499,7 @@ mod release_tests {
         // A manifest naming one of Pyo's images that isn't the pinned one.
         let mut r = release();
         r.manifests.pyo[0]["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"] =
-            json!("ghcr.io/upsetdev/pyo/agent:latest");
+            json!("ghcr.io/upsetdev/pyo-agent:latest");
         assert!(
             r.problems().iter().any(|p| p.contains("agent:latest")),
             "{:?}",
@@ -3583,42 +3590,47 @@ mod release_tests {
         assert!(platform.contains(&format!("image: {}\n", db_tools_image("postgres"))));
     }
 
+    /// Pyo's own images, as deploy/pyo-images.json lists them: their flat
+    /// names and the keys release.json names them by.
+    fn own_images() -> Vec<serde_json::Value> {
+        let list: serde_json::Value =
+            serde_json::from_str(include_str!("../../../deploy/pyo-images.json")).unwrap();
+        list["images"].as_array().unwrap().clone()
+    }
+
     /// The images scripts/release-manifest.ts writes into release.json are
     /// the ones a release is checked against, so a new image can't be
-    /// published without the upgrader accepting it.
+    /// published without the upgrader accepting it. It takes them from
+    /// deploy/pyo-images.json.
     #[test]
     fn release_manifest_script_writes_these_images() {
         let script = include_str!("../../../scripts/release-manifest.ts");
-        let names = script
-            .split_once("const names = {")
-            .and_then(|(_, rest)| rest.split_once("} as const;"))
-            .expect("release-manifest.ts has `const names = { … } as const;`")
-            .0;
-        let mut keys: Vec<String> = names
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.starts_with("//"))
-            .filter_map(|l| l.split_once(':'))
-            .map(|(_, v)| v.trim().trim_end_matches(',').trim_matches('"').to_owned())
-            .collect();
-        // The sandbox templates' images, from images.json.
+        assert!(script.contains("readFileSync(\"deploy/pyo-images.json\""));
         for key in ["sandboxBase", "sandboxDesktop"] {
             assert!(
                 script.contains(&format!("pinned.{key} = sandboxRef(")),
                 "release-manifest.ts sets {key}"
             );
-            keys.push(key.into());
         }
         let majors = script
             .split_once("for (const major of [")
             .and_then(|(_, rest)| rest.split_once(']'))
             .expect("release-manifest.ts lists Postgres versions")
             .0;
-        keys.extend(
-            majors
-                .split(',')
-                .map(|m| format!("postgres{}", m.trim().trim_matches('"'))),
-        );
+        let majors: Vec<String> = majors
+            .split(',')
+            .map(|m| format!("postgres{}", m.trim().trim_matches('"')))
+            .collect();
+        let postgres = own_images()
+            .into_iter()
+            .find(|i| i["placeholder"] == "postgres")
+            .unwrap();
+        assert_eq!(postgres["keys"], json!(majors));
+        let mut keys: Vec<String> = own_images()
+            .iter()
+            .flat_map(|i| i["keys"].as_array().unwrap().clone())
+            .map(|k| k.as_str().unwrap().to_owned())
+            .collect();
         keys.sort();
         let mut ours: Vec<String> = ReleaseImages::default()
             .all()
@@ -3627,6 +3639,42 @@ mod release_tests {
             .collect();
         ours.sort();
         assert_eq!(keys, ours);
+    }
+
+    /// The flat names: one folder, ghcr.io/upsetdev/ (or docker.io/upsetdev/),
+    /// with every name pyo or pyo-<something>, each once. The old nested
+    /// name is the placeholder under ghcr.io/upsetdev/pyo/.
+    #[test]
+    fn own_images_have_flat_names() {
+        let list: serde_json::Value =
+            serde_json::from_str(include_str!("../../../deploy/pyo-images.json")).unwrap();
+        assert_eq!(
+            list["registries"],
+            json!(["ghcr.io/upsetdev", "docker.io/upsetdev"])
+        );
+        assert_eq!(list["old"]["prefix"], "ghcr.io/upsetdev/pyo");
+        let until = list["old"]["until"].as_str().unwrap();
+        assert!(until.len() == 10 && until.as_bytes()[4] == b'-', "{until}");
+        let mut names = vec![];
+        for i in own_images() {
+            let name = i["name"].as_str().unwrap();
+            assert!(
+                name == "pyo"
+                    || name.strip_prefix("pyo-").is_some_and(|r| !r.is_empty()
+                        && r.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')),
+                "{name}"
+            );
+            assert!(!name.contains('/'), "{name} is flat");
+            if let Some(p) = i["placeholder"].as_str() {
+                // The flat name is the placeholder with pyo- in front.
+                assert!((name, p) == ("pyo", "pyo") || name.strip_prefix("pyo-") == Some(p), "{name}");
+            }
+            names.push(name.to_owned());
+        }
+        let count = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), count, "each name once");
     }
 
     #[test]
@@ -3696,7 +3744,7 @@ mod release_tests {
         env(
             &mut r,
             2,
-            format!("ghcr.io/upsetdev/pyo/sandbox-base:0.2.1@sha256:{D}"),
+            format!("ghcr.io/upsetdev/pyo-sandbox-base:0.2.1@sha256:{D}"),
         );
         assert!(
             r.problems()
@@ -3709,7 +3757,7 @@ mod release_tests {
         env(
             &mut r,
             3,
-            format!("ghcr.io/upsetdev/pyo/sandbox-desktop:0.2.1@sha256:{D}"),
+            format!("ghcr.io/upsetdev/pyo-sandbox-desktop:0.2.1@sha256:{D}"),
         );
         assert!(
             r.problems()
@@ -3793,13 +3841,23 @@ mod release_tests {
 
     /// The release this tree would publish, as scripts/release-manifest.ts
     /// writes it: deploy/k8s's manifests with Pyo's images pinned under
-    /// ghcr.io/upsetdev/pyo/, and the sandbox overrides left empty.
+    /// their flat names in ghcr.io/upsetdev/, and the sandbox overrides
+    /// left empty.
     fn release_of_this_tree() -> Release {
         let tag = format!("0.0.0@sha256:{D}");
-        let ours = |n: &str| format!("ghcr.io/upsetdev/pyo/{n}:{tag}");
+        let ours = |n: &str| format!("ghcr.io/upsetdev/{}:{tag}", flat(n));
         let manifests = |text: &str| -> Vec<serde_json::Value> {
+            let mut text = text.to_owned();
+            for i in own_images() {
+                if let Some(p) = i["placeholder"].as_str() {
+                    let name = i["name"].as_str().unwrap();
+                    text = text.replace(
+                        &format!("__IMAGES__/{p}:"),
+                        &format!("ghcr.io/upsetdev/{name}:"),
+                    );
+                }
+            }
             let text = text
-                .replace("__IMAGES__/", "ghcr.io/upsetdev/pyo/")
                 .replace("__TAG__", &tag)
                 .replace("__SANDBOX_BASE_REF__", "")
                 .replace("__SANDBOX_DESKTOP_REF__", "");
@@ -3825,9 +3883,9 @@ mod release_tests {
                 pyo_static: ours("static"),
                 mysql_operator: ours("mysql-operator"),
                 mysql_backup: ours("mysql-backup"),
-                postgres16: format!("ghcr.io/upsetdev/pyo/postgres:16-{tag}"),
-                postgres17: format!("ghcr.io/upsetdev/pyo/postgres:17-{tag}"),
-                postgres18: format!("ghcr.io/upsetdev/pyo/postgres:18-{tag}"),
+                postgres16: format!("ghcr.io/upsetdev/pyo-postgres:16-{tag}"),
+                postgres17: format!("ghcr.io/upsetdev/pyo-postgres:17-{tag}"),
+                postgres18: format!("ghcr.io/upsetdev/pyo-postgres:18-{tag}"),
                 sandbox_base: format!("ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:{D}"),
                 sandbox_desktop: format!("ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:{D}"),
             },
@@ -3839,10 +3897,36 @@ mod release_tests {
         }
     }
 
+    /// The rule installed Pyos (0.1.0 to 0.52.0) run on a release before
+    /// they update to it, copied from v0.51.0's `Release::problems` as it
+    /// shipped. It can't change on those installs. The folder of the
+    /// release's `pyo` image is Pyo's own: a manifest image in it must be
+    /// one the release pins.
+    fn refused_by_0_51_0(r: &Release) -> Vec<String> {
+        let ours: Vec<&str> = r.images.all().iter().map(|(_, i)| *i).collect();
+        let prefix = image_repo(&r.images.pyo)
+            .rsplit_once('/')
+            .map(|(p, _)| format!("{p}/"))
+            .unwrap_or_default();
+        let mut out = vec![];
+        for o in r.manifests.platform.iter().chain(&r.manifests.pyo) {
+            let mut images = vec![];
+            collect_images(o, &mut images);
+            for i in images {
+                if !prefix.is_empty() && i.starts_with(&prefix) && !ours.contains(&i.as_str()) {
+                    out.push(i);
+                }
+            }
+        }
+        out
+    }
+
     /// Installed Pyos check a release with their own rule before they
     /// update to it, and can't be changed once shipped. Every Pyo from
-    /// 0.1.0 to 0.51.0 refuses a release whose manifests use an image
-    /// under ghcr.io/upsetdev/pyo/ that the release doesn't pin. So the
+    /// 0.1.0 to 0.52.0 refuses a release whose manifests use an image in
+    /// the folder of the release's `pyo` image that the release doesn't
+    /// pin. With flat names that folder is ghcr.io/upsetdev/, so no
+    /// third-party image may be there (they come from Docker Hub). So the
     /// release this tree makes must pass that rule. cargo test runs in CI
     /// and in the release workflow's first job, before anything is
     /// published.
@@ -3856,8 +3940,18 @@ mod release_tests {
             "Installed Pyos would refuse to update to this release:\n{}",
             problems.join("\n")
         );
-        // v0.51.0's rule as it shipped, kept here as is: a change to
-        // problems() mustn't hide what installed Pyos refuse.
+        // The rule as 0.51.0 and 0.52.0 run it, on this release: Pyo's
+        // own folder is ghcr.io/upsetdev/.
+        assert_eq!(image_repo(&r.images.pyo), "ghcr.io/upsetdev/pyo");
+        let refused = refused_by_0_51_0(&r);
+        assert!(
+            refused.is_empty(),
+            "Pyo 0.51.0 and 0.52.0 would refuse to update to this release. These images are \
+             under ghcr.io/upsetdev/ but the release doesn't pin them: {refused:?}. Third-party \
+             images come from Docker Hub (deploy/mirrors.txt)."
+        );
+        // v0.51.0's rule for its own nested names, kept here as is: a
+        // change to problems() mustn't hide what installed Pyos refuse.
         let pinned: Vec<&str> = r.images.all().iter().map(|(_, i)| *i).collect();
         let mut images = vec![];
         for o in r.manifests.platform.iter().chain(&r.manifests.pyo) {
@@ -3873,24 +3967,58 @@ mod release_tests {
              ghcr.io/upsetdev/pyo/ but aren't Pyo's own: {refused:?}. Third-party images \
              come from Docker Hub (deploy/mirrors.txt)."
         );
-        // The manifests do use third-party images, so the rule had
-        // something to see.
+        // The manifests use Pyo's flat names and third-party images, so the
+        // rule had something to see.
+        assert!(images.iter().any(|i| i.starts_with("docker.io/")), "{images:?}");
         assert!(
-            images.iter().any(|i| i.starts_with("docker.io/")),
+            images
+                .iter()
+                .any(|i| i.starts_with("ghcr.io/upsetdev/pyo-agent:")),
             "{images:?}"
         );
-        // And a mirror under Pyo's own prefix is refused.
-        let mut bad = r.clone();
-        bad.manifests.platform.push(json!({ "kind": "Pod", "spec": { "containers": [{
-            "name": "x", "image": format!("ghcr.io/upsetdev/pyo/mirror/registry:3.1.2@sha256:{D}"),
-        }] } }));
-        assert!(
-            bad.problems()
-                .iter()
-                .any(|p| p.contains("pyo/mirror/registry") && p.contains("isn't one of")),
-            "{:?}",
-            bad.problems()
-        );
+    }
+
+    /// The rule with flat names: Pyo's folder is ghcr.io/upsetdev/, so an
+    /// image there that the release doesn't pin is refused, by this Pyo
+    /// and by 0.51.0 and 0.52.0. That's why third-party images left
+    /// ghcr.io/upsetdev/pyo-mirror/ with the rename, and why a manifest
+    /// can't use an old nested name.
+    #[test]
+    fn the_folder_of_pyos_own_images_is_ghcr_io_upsetdev() {
+        let r = release_of_this_tree();
+        let with = |image: String| {
+            let mut bad = r.clone();
+            bad.manifests.platform.push(json!({ "kind": "Pod", "spec": { "containers": [{
+                "name": "x", "image": image,
+            }] } }));
+            (bad.problems(), refused_by_0_51_0(&bad))
+        };
+        for image in [
+            // A copy of a third-party image under Pyo's folder.
+            format!("ghcr.io/upsetdev/pyo-mirror/registry:3.1.2@sha256:{D}"),
+            // An old nested name of one of Pyo's images.
+            format!("ghcr.io/upsetdev/pyo/agent:0.0.0@sha256:{D}"),
+            // Another image of Pyo's that the release doesn't pin.
+            format!("ghcr.io/upsetdev/pyo-agent:9.9.9@sha256:{D}"),
+        ] {
+            let (now, then) = with(image.clone());
+            assert!(
+                now.iter().any(|p| p.contains(&image) && p.contains("isn't one of")),
+                "{image}: {now:?}"
+            );
+            assert_eq!(then, vec![image]);
+        }
+        // Third-party images from Docker Hub are outside it.
+        for image in [
+            format!("docker.io/library/registry:3.1.2@sha256:{D}"),
+            "docker.io/library/busybox:1".to_owned(),
+        ] {
+            let (now, then) = with(image);
+            assert!(now.is_empty() && then.is_empty(), "{now:?} {then:?}");
+        }
+        // The sandbox templates' images are in it, and pinned.
+        let (now, then) = with(r.images.sandbox_base.clone());
+        assert!(now.is_empty() && then.is_empty(), "{now:?} {then:?}");
     }
 
     #[test]

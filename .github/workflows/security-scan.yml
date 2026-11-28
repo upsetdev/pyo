@@ -1,8 +1,9 @@
 name: Security scan
 
 # Every day, Trivy scans:
-# - the images of the latest release (ghcr.io/upsetdev/pyo/*, as its
-#   release.json pins them)
+# - Pyo's own images in the latest release, as its release.json pins
+#   them (ghcr.io/upsetdev/<name>, ghcr.io/upsetdev/pyo/<name> before
+#   0.52.1)
 # - the sandbox templates' images, from the latest images.json of
 #   upsetdev/pyo-sandbox-images (what Pyo runs, not the copy a release
 #   ships with)
@@ -58,7 +59,7 @@ jobs:
           set -euo pipefail
           tag=$(gh release view --json tagName --jq .tagName)
           gh release download "$tag" --pattern release.json --dir release
-          jq -c '[.images | to_entries[] | select(.value | startswith("ghcr.io/upsetdev/pyo/")) | {key: ("pyo/" + .key), ref: .value}]' \
+          jq -c '[.images | to_entries[] | select((.key | startswith("sandbox") | not) and (.value | startswith("ghcr.io/upsetdev/"))) | {key: ("pyo/" + .key), ref: .value}]' \
             release/release.json > pyo.json
           # The sandbox templates' images, keyed as release.json names
           # them (pyo/sandboxBase), by their dated tag when it has one.

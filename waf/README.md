@@ -129,7 +129,7 @@ It ships with Pyo. Its image's tag isn't Pyo's version: it's a hash of
 what the image is built from (`scripts/image-tags.sh waf`:
 `deploy/images/waf.Dockerfile`, `go.mod`, `go.sum` and `cmd/` without the
 tests). The release workflow (`.github/workflows/release.yml`, see
-`RELEASING.md`) runs these tests. When `ghcr.io/upsetdev/pyo/waf:<hash>`
+`RELEASING.md`) runs these tests. When `ghcr.io/upsetdev/pyo-waf:<hash>`
 isn't published yet, it builds and signs it. When it is, the release uses
 that image again. Either way it pins the digest in `release.json`, and
 installs set `PYO_WAF_IMAGE` from it. So the WAF's pods restart on
