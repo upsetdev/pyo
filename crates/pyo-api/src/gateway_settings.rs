@@ -25,9 +25,9 @@ use crate::{
 pub const REQUEST_RANGE: &str = "The request timeout is 1 to 3600 seconds, or 0 for no limit.";
 pub const IDLE_RANGE: &str = "The idle timeout is 60 to 86400 seconds (1 minute to 24 hours).";
 pub const IDLE_SHORT: &str = "The idle timeout must be at least the request timeout.";
-pub const TLS_VERSIONS: &str = "The TLS minimum is 1.2 or 1.3.";
+pub const TLS_VERSIONS: &str = "The minimum TLS version is 1.2 or 1.3.";
 pub const PUBLIC_FIRST: &str = "Turn on public ports first. HTTP/3 needs them.";
-pub const AGENT_FIRST: &str = "This cluster's agent doesn't have the Gateway settings yet. Update the agent first.";
+pub const AGENT_FIRST: &str = "Update this cluster's agent first.";
 
 /// What `setClusterGateway` asks: unset fields stay as they are.
 #[derive(Debug, Default, Clone)]

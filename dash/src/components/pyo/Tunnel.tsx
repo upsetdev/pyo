@@ -23,7 +23,7 @@ export function tunnelUnavailable(s: PyoState, c: Cluster): string | null {
   const account = cloudflareIn(s, c.teamId);
   if (!account) return "Connect Cloudflare first.";
   if (!account.zones.some((z) => z.tunnel?.ready))
-    return "Give the token Cloudflare Tunnel:Edit.";
+    return "Add Cloudflare Tunnel:Edit to the Cloudflare token.";
   if (c.capabilities.tunnel !== true) return "Not reported yet.";
   return null;
 }
@@ -47,7 +47,7 @@ function healthLine(t: ClusterTunnel): { tone: Tone; text: string } {
         text: `Tunnel degraded · ${ready} of ${plural(t.connectors.length, "connector")}`,
       };
     case "down":
-      return { tone: "danger", text: "Tunnel down. Its websites don't answer." };
+      return { tone: "danger", text: "Tunnel down. Its websites are offline." };
     // Pyo tried Cloudflare and failed, or no read came in time.
     case "unknown":
       return { tone: "neutral", text: "Pyo can't reach Cloudflare. Websites keep working." };
@@ -68,14 +68,14 @@ export function TunnelStatus({ c }: { c: Cluster }) {
   const notes = [
     ...t.connectors
       .filter((x) => !x.ready && x.reason)
-      .map((x) => `pyo-tunnel on ${x.server}: ${x.reason}`),
+      .map((x) => `Tunnel on ${x.server}: ${x.reason}`),
     t.state !== "failed" && t.error
       ? t.error
       : !cloudflareIn(s, c.teamId)
         ? "Connect Cloudflare again to change the tunnel."
         : null,
     t.refused
-      ? "Run the command under Refresh this cluster in the cluster's settings."
+      ? "Run the command under Refresh this cluster."
       : null,
   ].filter((x): x is string => !!x);
   return (
@@ -197,7 +197,7 @@ export function TunnelSettings({
             <p className="text-[12px] text-warning">
               {install?.state === "updating"
                 ? "This cluster is updating. Try again in a few minutes."
-                : "Run the command under Refresh this cluster in the cluster's settings first."}
+                : "Run the command under Refresh this cluster first."}
             </p>
           ) : null}
         </div>

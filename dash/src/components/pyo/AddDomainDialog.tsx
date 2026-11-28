@@ -142,7 +142,7 @@ export function AddDomainDialog({
   // use by default: traffic goes straight to its servers. In tunnel mode,
   // under the tunnel's default domain.
   const tunnelMode = cluster?.traffic === "tunnel";
-  // The cluster's Tailnet switch is off: no new tailnet domains.
+  // The cluster's Tailscale switch is off: no new tailnet domains.
   const tailnetOff = !!cluster && !clusterPaths(cluster).tailnet;
   // Before a service is picked: by the clusters it could be on.
   const freeNoun = freeDomainNoun(
@@ -439,7 +439,7 @@ export function AddDomainDialog({
                 !app
                   ? "Pick a service first"
                   : tailnetOff
-                    ? `Tailnet is off on ${cluster?.name}.`
+                    ? `Tailscale is off on ${cluster?.name}.`
                     : "Private, on ts.net"
               }
               selected={k === "tailnet"}
