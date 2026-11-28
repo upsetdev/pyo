@@ -912,7 +912,7 @@ pub fn admission_with(
                 object.spec.all(k, k in ['targetRefs', 'authorization']) && object.spec.authorization.all(k, k in ['defaultAction', 'rules']) && \
                 (!has(object.spec.authorization.rules) || object.spec.authorization.rules.all(r, (variables.toWebRoute && (r == {acme_rule} || r == {gate_rule})) || (r.all(k, k in ['name', 'action', 'principal']) && r.principal.all(k, k == 'clientCIDRs' || (k in ['clientIPGeoLocations', 'headers'] && variables.toWebRoute)) && \
                     (!has(r.principal.clientIPGeoLocations) || r.principal.clientIPGeoLocations.all(g, g.all(k, k == 'country'))) && \
-                    (!has(r.principal.headers) || (size(r.principal.headers) == 1 && r.principal.headers.all(h, h.all(k, k in ['name', 'values']) && h.name == '{country_header}' && h.values.all(v, v.matches('^[A-Z]{{2}}$'))))))))) && \
+                    (!has(r.principal.headers) || (size(r.principal.headers) == 1 && r.principal.headers.all(h, h.all(k, k in ['name', 'values']) && h.name == '{country_header}' && h.values.all(v, v.matches('^[A-Z]{{2}}$')))))))) && \
                 (!has(object.spec.authorization.rules) || !object.spec.authorization.rules.exists(r, has(r.principal) && has(r.principal.headers)) || object.spec.authorization.rules[0] == {gate_rule} || \
                     (size(object.spec.authorization.rules) >= 2 && object.spec.authorization.rules[0] == {acme_rule} && object.spec.authorization.rules[1] == {gate_rule})))) || \
             (request.resource.resource == 'backendtrafficpolicies' && (request.operation == 'DELETE' || variables.portPolicy && variables.familyRoutes && \
@@ -2009,6 +2009,42 @@ mod tests {
         fw.behind = None;
         let t = crate::firewall::tunnel_authorization(&fw);
         assert_eq!(t["rules"][0], crate::firewall::behind_gate_rule());
+    }
+
+    /// Every expression of the admission policy has its parentheses and
+    /// brackets balanced outside its strings: the API server refuses the
+    /// whole policy over one stray parenthesis, and these tests only look
+    /// for parts of it.
+    #[test]
+    fn admission_expressions_are_balanced() {
+        fn check(where_: &str, e: &str) {
+            let (mut paren, mut bracket, mut quote) = (0i64, 0i64, false);
+            for (i, c) in e.char_indices() {
+                if quote {
+                    quote = c != '\'';
+                    continue;
+                }
+                match c {
+                    '\'' => quote = true,
+                    '(' => paren += 1,
+                    ')' => paren -= 1,
+                    '[' => bracket += 1,
+                    ']' => bracket -= 1,
+                    _ => {}
+                }
+                assert!(paren >= 0 && bracket >= 0, "{where_}: closes too early at {i}: {}", &e[i.saturating_sub(120)..i + 1]);
+            }
+            assert!(paren == 0 && bracket == 0 && !quote, "{where_}: {paren} ( and {bracket} [ left open");
+        }
+        for policy in admission(system::WAF_IMAGE_DEFAULT, system::GEOIP_IMAGE_DEFAULT) {
+            for key in ["variables", "validations", "matchConditions"] {
+                for v in policy["spec"][key].as_array().into_iter().flatten() {
+                    if let Some(e) = v["expression"].as_str() {
+                        check(&format!("{key} {}", v["name"]), e);
+                    }
+                }
+            }
+        }
     }
 
     /// The client policies that remove visitor headers: the agent may
