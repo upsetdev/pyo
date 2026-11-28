@@ -1027,7 +1027,9 @@ above, this list wins. Each change keeps traffic flowing.
   present, each write in the agent's order, each old object going), so
   the gap is in timing, not in the objects. Now the old routes go only
   once every new route's status says Accepted and ResolvedRefs
-  (`gateway::new_routes_taken`), at most 30 seconds. Past that they stay
+  (`gateway::new_routes_taken`), at most 30 seconds, and 3 seconds
+  more: Envoy Gateway writes the status apart from sending the routes to
+  the proxies (one probe still got a 404 without it, 2026-11-28). Past that they stay
   for the next sync, and the deploy log says so. When nothing writes route
   status (the old routes have none), nothing waits.
 - **TCP and UDP ports pause when public ports go on or off.** They move

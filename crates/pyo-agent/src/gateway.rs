@@ -1631,6 +1631,14 @@ pub const ROUTES_WAITING: &str = "The gateway hasn't taken this service's new ro
 const ROUTES_TAKEN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
 const ROUTES_TAKEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// After the new routes are taken, before the old ones go: Envoy Gateway
+/// writes a route's status apart from sending it to the proxies, so the
+/// proxies may not have it yet (one probe still got a 404 in the traffic
+/// test without this).
+#[cfg(not(test))]
+const ROUTES_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+const ROUTES_SETTLE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The names of a service's HTTPRoutes.
 async fn route_names(client: &Client, service_id: &str) -> std::collections::BTreeSet<String> {
@@ -1702,6 +1710,7 @@ async fn new_routes_taken(
             all &= taken;
         }
         if all {
+            tokio::time::sleep(ROUTES_SETTLE).await;
             return true;
         }
         if tokio::time::Instant::now() >= deadline {
