@@ -1076,9 +1076,10 @@ probe_stop() {
   wait "$PROBE_PID" 2>/dev/null || true
   PROBE_PID=""
   LC_ALL=C awk '{ n++; d = ($2 == "200"); e = ($3 == "200"); if (d && e) both++; else if (d) direct++; else if (e) edge++; else down++
-                  if ($4 == "200") t++; else { tf++; ts[$4]++ } }
-    END { printf "mv: %d probes, %d on both paths, %d direct only, %d through the edge only, %d both down. TCP port: %d answered, %d failed", n, both, direct, edge, down, t, tf
-          for (k in ts) printf " (%s: %d)", k, ts[k]; printf "\n" }' "$DIR/probe.log"
+                  if ($4 == "-") nt++; else if ($4 == "200") t++; else { tf++; ts[$4]++ } }
+    END { printf "mv: %d probes, %d on both paths, %d direct only, %d through the edge only, %d both down.", n, both, direct, edge, down
+          if (nt < n) { printf " TCP port: %d answered, %d failed", t, tf; for (k in ts) printf " (%s: %d)", k, ts[k] }
+          printf "\n" }' "$DIR/probe.log"
   cat "$DIR/probe.log" >>"$DIR/probes.log"
 }
 
