@@ -1586,15 +1586,20 @@ const SERVICE_KINDS: [&str; 10] = [
 ];
 
 /// A cert-manager Certificate whose Secret name is about to hold an
-/// uploaded certificate: deleted, its dependents first (the Secret, which
-/// cert-manager makes it own), and waited for; then the Secret by name, in
-/// case it was made before Certificates owned theirs.
+/// uploaded certificate: deleted and waited for, its Secret orphaned. The
+/// Secret stays, so the HTTPS listener that names it keeps serving, and the
+/// caller writes the uploaded certificate over it at once. Deleting the
+/// Secret first left the listener without one for seconds: new HTTPS
+/// connections to the domain failed (measured in the traffic test, as a
+/// domain moved to Cloudflare Tunnel). Kubernetes takes the Certificate's
+/// owner reference off the Secret as it orphans it, so neither cert-manager
+/// nor the Certificate's deletion takes the uploaded one.
 async fn retire_certificate(client: &Client, name: &str) -> anyhow::Result<()> {
     let certs = api_of(client, "Certificate");
     if certs.get_opt(name).await?.is_none() {
         return Ok(());
     }
-    match certs.delete(name, &DeleteParams::foreground()).await {
+    match certs.delete(name, &DeleteParams::orphan()).await {
         Ok(_) => {}
         Err(kube::Error::Api(e)) if e.code == 404 => {}
         Err(e) => return Err(e.into()),
@@ -1605,14 +1610,7 @@ async fn retire_certificate(client: &Client, name: &str) -> anyhow::Result<()> {
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    match Api::<Secret>::namespaced(client.clone(), GATEWAY_NS)
-        .delete(name, &DeleteParams::default())
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    Ok(())
 }
 
 /// Remove a service's objects that aren't in `wanted` (everything, when
@@ -5377,6 +5375,24 @@ mod tests {
     /// first, so the uploaded Secret isn't taken with them. Needs a
     /// throwaway cluster with cert-manager and Pyo's issuers:
     /// KUBECONFIG=… cargo test -p pyo-agent -- --ignored gateway::tests::retires
+    /// An uploaded certificate taking a cert-manager certificate's Secret
+    /// name: the Certificate goes, the Secret never does, and the upload
+    /// is written over it.
+    #[tokio::test]
+    async fn an_upload_takes_a_certificates_secret_without_a_gap() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let name = format!("{TLS_SECRET_PREFIX}t-gap");
+        let cert = format!("apis/cert-manager.io/v1/namespaces/{GATEWAY_NS}/certificates/{name}");
+        let secret = format!("api/v1/namespaces/{GATEWAY_NS}/secrets/{name}");
+        kube.put(&cert, json!({ "apiVersion": "cert-manager.io/v1", "kind": "Certificate", "spec": { "secretName": name } }));
+        kube.put(&secret, json!({ "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls", "data": { "tls.crt": "bGU=", "tls.key": "bGU=" } }));
+        retire_certificate(&client, &name).await.unwrap();
+        assert!(kube.get(&cert).is_none(), "the Certificate goes");
+        assert!(kube.get(&secret).is_some(), "the listener's Secret stays");
+        // Nothing to retire: fine.
+        retire_certificate(&client, "pyo-tls-t-none").await.unwrap();
+    }
+
     #[tokio::test]
     #[ignore = "needs a throwaway Kubernetes API server"]
     async fn retires_a_certificate_before_an_upload_takes_its_name_on_a_cluster() {
@@ -5416,7 +5432,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(secrets.get_opt(&name).await.unwrap().is_none());
+        // The Secret stays for the listener, no longer owned.
+        let kept = secrets.get_opt(&name).await.unwrap().expect("the Secret stays");
+        assert!(kept.metadata.owner_references.unwrap_or_default().is_empty());
         let uploaded = json!({ "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls", "metadata": { "name": name, "namespace": GATEWAY_NS },
             "stringData": { "tls.crt": "", "tls.key": "" } });
         secrets

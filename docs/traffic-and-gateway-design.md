@@ -1005,6 +1005,17 @@ above, this list wins. Each change keeps traffic flowing.
   `tunnel_loop::promote` sets `on`: 90 seconds after the record moved, or
   a DNS-only record it replaced's TTL plus 30 seconds (300 for "auto").
   Public ports waiting for the move close after that.
+- **The tunnel's certificate no longer leaves a gap** (traffic test,
+  2026-11-28). When the tunnel's Origin CA certificate took a domain
+  over, the agent deleted the domain's cert-manager Certificate and its
+  Secret before writing the uploaded one under that name. For 2 to 4
+  seconds new HTTPS connections to the moving domain failed. Now the
+  Certificate is deleted with its Secret orphaned, and the upload is
+  written over the Secret (`gateway::retire_certificate`).
+- **A moving domain still answers 404 for about a second** as it goes
+  `switching` (seen twice in the traffic test, 2026-11-28). Not fixed:
+  the cause isn't known yet. Its routes are renamed then, and the old one
+  goes only after the new one is written.
 - **TCP and UDP ports pause when public ports go on or off.** They move
   between Envoy's Service and `pyo-public-ports`, and ServiceLB can't hold
   one port for both. Measured: about 1 second going off, about 5 seconds
