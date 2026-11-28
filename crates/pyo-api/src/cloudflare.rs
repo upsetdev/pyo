@@ -195,6 +195,20 @@ fn addressing(kind: &str) -> bool {
     matches!(kind, "A" | "AAAA" | "CNAME")
 }
 
+/// Which record at a name to edit in place when the name changes, so it
+/// keeps answering while the others go (lowest first): a CNAME (it's alone
+/// at its name), then a proxied record (Cloudflare answers both A and AAAA
+/// for it), then A, then AAAA.
+pub(crate) fn in_place_rank(kind: &str, proxied: bool) -> u8 {
+    match (kind, proxied) {
+        ("CNAME", _) => 0,
+        ("A", true) => 1,
+        ("AAAA", true) => 2,
+        ("A", false) => 3,
+        _ => 4,
+    }
+}
+
 /// What to do about a name, given the records on it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
@@ -1210,10 +1224,11 @@ pub(crate) struct Outcome {
 }
 
 /// Make `host`'s record point at `ip` in `zone_id`: create it, find it
-/// already there, or report what's in the way. With `replace`, the records
-/// in the way are deleted first. Never touches records of other names or
-/// types than A, AAAA and CNAME.
-pub(crate) async fn ensure<C: Cloudflare>(
+/// already there, or report what's in the way. With `replace`, one record
+/// in the way is edited into it in place and the others are deleted first,
+/// so the name never goes without a record. Never touches records of
+/// other names or types than A, AAAA and CNAME.
+pub(crate) async fn ensure<C: Cloudflare + TunnelApi>(
     cf: &C,
     zone_id: &str,
     host: &str,
@@ -1235,19 +1250,55 @@ pub(crate) async fn ensure<C: Cloudflare>(
             });
         }
         Plan::Conflict(others) => {
+            // The record already pointing there, if any, keeps answering.
+            // Else one of the others is edited into it once the rest are gone.
+            let same = found.into_iter().find(|r| {
+                !others.iter().any(|o| o.id == r.id)
+                    && r.kind == "A"
+                    && r.content.eq_ignore_ascii_case(ip)
+                    && same_name(&r.name, host)
+            });
+            let keep = match same {
+                Some(_) => None,
+                None => others
+                    .iter()
+                    .min_by_key(|r| in_place_rank(&r.kind, r.proxied))
+                    .cloned(),
+            };
             for r in &others {
+                if keep.as_ref().is_some_and(|k| k.id == r.id) {
+                    continue;
+                }
                 match cf.delete(zone_id, &r.id).await {
                     Ok(()) | Err(CfError::NotFound) => replaced.push(r.clone()),
                     Err(e) => return Err(e),
                 }
             }
-            // What's left is the record already pointing there, if any.
-            found.into_iter().find(|r| {
-                !others.iter().any(|o| o.id == r.id)
-                    && r.kind == "A"
-                    && r.content.eq_ignore_ascii_case(ip)
-                    && same_name(&r.name, host)
-            })
+            if let Some(k) = keep {
+                let want = tunnel::Kept {
+                    id: String::new(),
+                    kind: "A".into(),
+                    name: host.to_owned(),
+                    content: ip.to_owned(),
+                    proxied,
+                    ttl: 1,
+                    comment: Some(marker.to_owned()),
+                };
+                let r = match cf.overwrite(zone_id, &k.id, &want).await {
+                    // Gone meanwhile: the name is free, so made new.
+                    Err(CfError::NotFound) => cf.create_kept(zone_id, &want).await?,
+                    r => r?,
+                };
+                replaced.push(k);
+                return Ok(Outcome {
+                    status: "created",
+                    record: Some(r),
+                    replaced,
+                    existing: vec![],
+                    error: None,
+                });
+            }
+            same
         }
         Plan::Have(r) => Some(r),
         Plan::Create => None,

@@ -76,6 +76,13 @@ Decisions made while building (not in the first draft):
   "confirm" and waits for **Replace and switch**. So records made by hand
   or by other tools are never replaced without a yes. Pyo's own
   direct record isn't kept in `previous`: Switch back makes a new one.
+- **Records change in place** (2026-11-29). Switching never deletes the
+  record at a name and then creates the CNAME. A resolver asking in that
+  gap caches NXDOMAIN for the zone's negative TTL (the SOA minimum, often
+  1800 s), so the name could fail for up to 30 minutes. Instead one
+  record at the name is overwritten with `PUT` (same id, new type,
+  content, proxied, TTL and comment), and Switch back overwrites Pyo's
+  CNAME the same way. See §6.1 for the order and what's left.
 - **Both paths only while a domain switches** (2026-11-22). A
   domain's `tunnel` is `"switching"` or `"on"`:
   - `"switching"`: the Gateway has the tunnel listener and route, the
@@ -620,6 +627,7 @@ pinned, no redirects, outbound client with `Reach { private: false }`).
 |---|---|---|
 | Zones and their account | `GET /zones?per_page=50&page=n` (already called, now also reads `result[].account.{id,name}`) | Zone:Read |
 | Records (exists) | `GET/POST/PATCH/DELETE /zones/{zone}/dns_records[/{id}]` | DNS:Edit |
+| Edit a record in place | `PUT /zones/{zone}/dns_records/{id}` with the whole record (`type`, `name`, `content`, `proxied`, `ttl`, `comment`), see "Changing a name's records" below | DNS:Edit |
 | Tunnel permission check | `POST /accounts/{acct}/cfd_tunnel` `{ "name": "pyo-check-<install id>-<6 hex>", "config_src": "cloudflare" }`, then `DELETE /accounts/{acct}/cfd_tunnel/{id}`. Leftovers are listed with `GET /accounts/{acct}/cfd_tunnel?name=pyo-check-<install id>-&is_deleted=false`, and only this installation's own (that prefix and six hex characters) made more than 5 minutes ago (`created_at`) are deleted. Another installation's probes and anyone's own `pyo-check-…` tunnel are never touched. Once per account. | Cloudflare Tunnel:Edit |
 | Origin CA permission check | `GET /certificates?zone_id={zone}` | SSL and Certificates:Read (Edit is required, see below) |
 | Create tunnel | `POST /accounts/{acct}/cfd_tunnel` `{ "name": "pyo-<cluster>-<install id>", "config_src": "cloudflare" }` | Cloudflare Tunnel:Edit |
@@ -653,6 +661,53 @@ traffic." The cleanup call
 removes a connector "independently of its current state", and all of them
 without `client_id`. So the secret change cuts nothing, and the cleanup
 cuts live connections.
+
+**Changing a name's records** (2026-11-29). A name must never be left
+without an A, AAAA or CNAME record, even for a moment: a resolver that
+asks then caches NXDOMAIN (or an empty answer) for the zone's negative
+TTL, often 1800 s. So Pyo edits one record in place and never deletes
+the last one before making the new one.
+
+- "Overwrite DNS Record" (`PUT`,
+  https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/update/)
+  and "Update DNS Record" (`PATCH`,
+  https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/edit/)
+  take a body of any record type with its own `type`. The docs don't say
+  in words whether the type may change. Checked on the test zone on
+  2026-11-29: `PUT` turns a proxied A into a proxied CNAME to
+  `<uuid>.cfargotunnel.com` and back, and `PATCH` turns an A into a
+  CNAME. The record keeps its id each time. A `PUT` without `comment`
+  clears it. A proxied record's TTL stays 1 (automatic) whatever is sent.
+  Cloudflare's authoritative servers answered all 199 queries made during
+  the edits.
+- A CNAME can't share its name with an A, AAAA or CNAME. A `PUT` that
+  would make one is refused with code 81053 ("An A, AAAA, or CNAME record
+  with that host already exists"), checked on the same day.
+
+The order, in `switch_record` and `revert_record` (`tunnel_loop.rs`) and
+the direct path's replace (`cloudflare::ensure`):
+
+| Move | Steps | The name answers throughout |
+|---|---|---|
+| One A, AAAA or CNAME to the tunnel's CNAME | `PUT` it into the CNAME | Yes |
+| Pyo's CNAME to an old tunnel | `PUT` it to the new target | Yes |
+| Several records to the CNAME | Pick one to keep: a CNAME, else a proxied A, a proxied AAAA, an A, an AAAA. Delete the others, then `PUT` the kept one into the CNAME | Yes, see below |
+| Switch back with kept records | `PUT` Pyo's CNAME into one kept record (same pick), then `POST` the other kept records | Yes, see below |
+| Switch back to the public IP | `PUT` Pyo's CNAME into Pyo's A record | Yes |
+| Switch back with nothing to put back and no public IP | `DELETE` Pyo's CNAME | No, the name is left empty on purpose |
+| Direct path, Replace | Keep the A that already points there if any, else pick one as above. Delete the others, then `PUT` the kept one into the A | Yes |
+
+What's left: with several DNS-only records of both types, for example an
+A and an AAAA, the A is kept and the AAAA goes first. Between that delete
+and the `PUT` (well under a second) an AAAA query gets an empty answer,
+and a resolver may cache that for the negative TTL. A queries always
+answer, so dual-stack visitors fall back to IPv4. Switch back has the same
+short window for the AAAA it makes again. A proxied record has no such
+window, since Cloudflare answers both A and AAAA for it.
+
+If a step fails halfway (a delete went through, the `PUT` didn't), the
+records already deleted aren't in `previous`. The name still has the
+kept record, and the next pass tries again.
 
 There's no cheap probe for SSL and Certificates **Edit** short of issuing a
 certificate. The check reads (proves Read), and the first issue reports a
@@ -722,15 +777,18 @@ tasks next to `deploy::dns_watcher` (`deploy.rs:2531`). Per cluster with a
      domain's `tunnel: "switching"` reached the agent (its applied routes
      revision is at least the switch's): `cloudflare::ensure`-like with
      `kind = CNAME`, `content = <tunnel_id>.cfargotunnel.com`,
-     `proxied = true`, comment `marker(install_id)`. Replaced records go to
+     `proxied = true`, comment `marker(install_id)`. A record already at
+     the name is edited into the CNAME in place, the others there are
+     deleted first ("Changing a name's records", §6.1). Replaced records go to
      `previous` (only when the op said `replace`). Then `status = 'created'`,
      the domain's `tunnel = "on"` (gate on, :80 route gone) and its
      `status = 'active'`.
    - Rows `status = 'reverting'`: the domain goes back to
-     `tunnel: "switching"` first. Once that reached the agent: delete
-     Pyo's CNAME (`delete_ours`, `cloudflare.rs:1124`), create each
-     `previous` record as it was (or an A record to the public IP, per the
-     op), then drop `tunnel` from the domain and the route on the next pass
+     `tunnel: "switching"` first. Once that reached the agent: Pyo's
+     CNAME (only if it's still Pyo's, `ours()`) is edited in place into
+     one `previous` record as it was, and the other `previous` records
+     are created (or it becomes an A record to the public IP, per the op).
+     Then drop `tunnel` from the domain and the route on the next pass
      (records first, route after: no gap).
    - The default domain's wildcard: `edgecert::ensure_wildcard`
      (`sandbox/edgecert.rs:775`) with a CNAME.
@@ -1446,7 +1504,8 @@ when in tunnel mode, warning tone when degraded or down.
 **Rollback paths**
 
 - Per domain: **Switch back**. Records first (kept ones restored, or an A
-  record to the public IP on a public-ports cluster), then the route goes.
+  record to the public IP on a public-ports cluster, Pyo's CNAME edited
+  into it in place), then the route goes.
   Proxied-to-proxied changes take effect at Cloudflare at once. A
   DNS-only kept record follows its TTL, while the tunnel route still
   answers until the next pass, so there's no gap.
@@ -1596,6 +1655,10 @@ sentences, no semicolons, no dash-joined clauses.
   - switch: create, conflict → confirm, replace keeps `previous`, switch
     back restores exactly (type, content, proxied, ttl, comment), switch
     back without kept record (public IP / delete only).
+  - records change in place: the record id stays across the switch and
+    back, and the fake (which refuses a CNAME next to another record, like
+    Cloudflare) records every name a delete leaves empty. None is, except
+    Switch back with nothing to put back.
   - only records Pyo made are deleted (`ours`), tunnels Pyo didn't make
     are never deleted.
   - recreate after `deleted_at`: records repointed, token resent.

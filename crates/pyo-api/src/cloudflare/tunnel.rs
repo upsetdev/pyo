@@ -128,6 +128,11 @@ pub(crate) trait TunnelApi {
     async fn records_kept(&self, zone_id: &str, name: &str) -> Result<Vec<Kept>, CfError>;
     /// Create a record as it was.
     async fn create_kept(&self, zone_id: &str, r: &Kept) -> Result<Record, CfError>;
+    /// Overwrite record `id` with `r` in place (PUT): the same id, so the
+    /// name never goes without a record. Cloudflare takes a type change
+    /// (A to CNAME and back) as long as no other A, AAAA or CNAME is left
+    /// at the name. A missing comment clears it.
+    async fn overwrite(&self, zone_id: &str, id: &str, r: &Kept) -> Result<Record, CfError>;
     /// The account's tunnels named `name` that aren't deleted.
     async fn tunnels_named(&self, account: &str, name: &str) -> Result<Vec<Tunnel>, CfError>;
     /// A remotely managed tunnel (its routes are set through the API).
@@ -220,6 +225,18 @@ fn kept_from(v: &Value) -> Result<Kept, CfError> {
         .map_err(|_| unreadable())
 }
 
+/// A whole record as Cloudflare takes it on POST and PUT.
+fn kept_body(r: &Kept) -> Value {
+    let mut body = json!({
+        "type": r.kind, "name": r.name, "content": r.content,
+        "ttl": r.ttl, "proxied": r.proxied,
+    });
+    if let Some(c) = &r.comment {
+        body["comment"] = json!(c);
+    }
+    body
+}
+
 impl TunnelApi for Http {
     async fn zone_accounts(&self) -> Result<Vec<CfZone>, CfError> {
         let mut out = vec![];
@@ -270,14 +287,12 @@ impl TunnelApi for Http {
 
     async fn create_kept(&self, zone_id: &str, r: &Kept) -> Result<Record, CfError> {
         let url = self.url(&Self::record_path(zone_id, None)?);
-        let mut body = json!({
-            "type": r.kind, "name": r.name, "content": r.content,
-            "ttl": r.ttl, "proxied": r.proxied,
-        });
-        if let Some(c) = &r.comment {
-            body["comment"] = json!(c);
-        }
-        super::record_from(&self.call(Method::POST, url, Some(body)).await?["result"])
+        super::record_from(&self.call(Method::POST, url, Some(kept_body(r))).await?["result"])
+    }
+
+    async fn overwrite(&self, zone_id: &str, id: &str, r: &Kept) -> Result<Record, CfError> {
+        let url = self.url(&Self::record_path(zone_id, Some(id))?);
+        super::record_from(&self.call(Method::PUT, url, Some(kept_body(r))).await?["result"])
     }
 
     async fn tunnels_named(&self, account: &str, name: &str) -> Result<Vec<Tunnel>, CfError> {

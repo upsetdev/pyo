@@ -230,12 +230,35 @@ async fn handle(
             a.records.push((zone.to_string(), r.clone()));
             ok(r)
         }
-        ("GET" | "PATCH" | "DELETE", ["zones", zone, "dns_records", id]) => {
+        ("GET" | "PATCH" | "PUT" | "DELETE", ["zones", zone, "dns_records", id]) => {
             let Some(i) = a.records.iter().position(|(z, r)| z == zone && r["id"] == *id) else {
                 return err(StatusCode::NOT_FOUND, "Record not found");
             };
             match m {
                 "GET" => ok(a.records[i].1.clone()),
+                "PUT" => {
+                    // The whole record as sent, the id as it was. A CNAME
+                    // is alone at its name (Cloudflare's code 81053).
+                    let addressing = |t: &Value| matches!(t.as_str(), Some("A" | "AAAA" | "CNAME"));
+                    let clash = addressing(&body["type"])
+                        && a.records.iter().any(|(z, r)| {
+                            z == zone
+                                && r["id"] != *id
+                                && r["name"] == body["name"]
+                                && addressing(&r["type"])
+                                && (body["type"] == "CNAME" || r["type"] == "CNAME")
+                        });
+                    if clash {
+                        return err(StatusCode::BAD_REQUEST, "An A, AAAA, or CNAME record with that host already exists.");
+                    }
+                    let mut r = body.clone();
+                    r["id"] = json!(id);
+                    if r.get("ttl").is_none() {
+                        r["ttl"] = json!(1);
+                    }
+                    a.records[i].1 = r.clone();
+                    ok(r)
+                }
                 "PATCH" => {
                     if let Some(o) = body.as_object() {
                         for (k, v) in o {
