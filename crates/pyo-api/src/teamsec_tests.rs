@@ -140,13 +140,12 @@ async fn code_now(db: &PgPool, user: &str, offset_steps: i64) -> String {
             .await
             .unwrap();
     let b32 = crate::secrets::Sealer::for_tests().open(&sealed).unwrap();
-    let secret = totp_rs::Secret::try_from_base32(&b32).unwrap();
-    let t = totp_rs::Builder::new().with_secret(secret).build().unwrap();
+    let secret = crate::twofactor::base32_decode(&b32).unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    t.generate((now + offset_steps * 30) as u64).to_string()
+    crate::twofactor::code_for_step(&secret, (now + offset_steps * 30) as u64 / 30).unwrap()
 }
 
 /// An audit row as the checks read it: action, outcome, via, ip, user
