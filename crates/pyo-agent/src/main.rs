@@ -21,6 +21,7 @@ mod drain;
 #[cfg(test)]
 mod fakekube;
 mod firewall;
+mod flag;
 mod forward;
 mod gateway;
 mod gpu;
