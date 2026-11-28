@@ -31,7 +31,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
-use axum_extra::extract::CookieJar;
+use crate::cookies::CookieJar;
 use serde::Deserialize;
 use serde_json::{Value, json};
 

@@ -23,7 +23,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{Router, extract::State, http::HeaderMap, routing::post};
-use axum_extra::extract::CookieJar;
+use crate::cookies::CookieJar;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};

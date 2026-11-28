@@ -26,7 +26,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     routing::{patch, post},
 };
-use axum_extra::extract::CookieJar;
+use crate::cookies::CookieJar;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use serde_json::{Value, json};

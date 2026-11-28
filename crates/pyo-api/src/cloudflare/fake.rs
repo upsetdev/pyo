@@ -177,9 +177,9 @@ fn sign(csr: &str, days: i64) -> Option<String> {
     ca.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let issuer = Issuer::new(ca, ca_key);
     let mut req = CertificateSigningRequestParams::from_pem(csr).ok()?;
-    let now = cookie::time::OffsetDateTime::now_utc();
-    req.params.not_before = now - cookie::time::Duration::days(1);
-    req.params.not_after = now + cookie::time::Duration::days(days);
+    let now = time::OffsetDateTime::now_utc();
+    req.params.not_before = now - time::Duration::days(1);
+    req.params.not_after = now + time::Duration::days(days);
     Some(req.signed_by(&issuer).ok()?.pem())
 }
 
