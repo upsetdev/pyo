@@ -1043,6 +1043,9 @@ pub async fn apply(
         notes.push(p.clone());
     }
     let mut r = route_objects(spec);
+    // The routes the service has now: the ones it gets new below must be
+    // taken before these go (`new_routes_taken`).
+    let routes_before = route_names(client, &spec.service.service_id).await;
     // Behind a CDN, or through the tunnel: its HTTPS client policy as the
     // cluster's websites have theirs otherwise. The tunnel's trusts its
     // connectors' pods as they are now.
@@ -1204,7 +1207,14 @@ pub async fn apply(
     for old in before.iter().filter(|s| !r.secrets.contains(s)) {
         let _ = secrets.delete(old, &DeleteParams::default()).await;
     }
-    remove_stale(client, &spec.service.service_id, &wanted, &r.secrets).await;
+    // Make before break: the old routes go once Envoy Gateway serves the
+    // new ones. Else they stay for the next sync.
+    if new_routes_taken(client, &spec.service.service_id, &wanted, &routes_before).await {
+        remove_stale(client, &spec.service.service_id, &wanted, &r.secrets).await;
+    } else {
+        tracing::warn!(service = %spec.service.service_id, "the gateway hasn't taken the new routes: the old ones stay");
+        notes.push(ROUTES_WAITING.into());
+    }
     // The firewall on UDP ports: the proxy pods' network policy.
     // (The details go to the agent's log; the deploy's log says it plainly.)
     if let Err(e) = crate::firewall::proxy_policy(client).await {
@@ -1611,6 +1621,94 @@ async fn retire_certificate(client: &Client, name: &str) -> anyhow::Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     Ok(())
+}
+
+/// Said when the old routes stay because the new ones weren't taken in time.
+pub const ROUTES_WAITING: &str = "The gateway hasn't taken this service's new routes yet. Its old routes keep answering until it has.";
+
+/// How long the old routes wait for the new ones to be taken.
+#[cfg(not(test))]
+const ROUTES_TAKEN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const ROUTES_TAKEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The names of a service's HTTPRoutes.
+async fn route_names(client: &Client, service_id: &str) -> std::collections::BTreeSet<String> {
+    api_of(client, "HTTPRoute")
+        .list(&ListParams::default().labels(&format!("{SERVICE_LABEL}={service_id}")))
+        .await
+        .map(|l| l.items.iter().map(|o| o.name_any()).collect())
+        .unwrap_or_default()
+}
+
+/// Whether Envoy Gateway took a route: each of its parents says Accepted
+/// and ResolvedRefs.
+pub fn route_accepted(o: &Value) -> bool {
+    o["status"]["parents"].as_array().is_some_and(|ps| {
+        !ps.is_empty()
+            && ps.iter().all(|p| {
+                let ok = |t: &str| {
+                    p["conditions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|c| c["type"] == t && c["status"] == "True")
+                };
+                ok("Accepted") && ok("ResolvedRefs")
+            })
+    })
+}
+
+/// Make before break: when a service's routes are renamed (a domain going
+/// through the tunnel, or only through it), its old routes may go only
+/// once Envoy Gateway took the new ones. Deleting them at once let it see
+/// the old gone before the new one was in, and the domain answered 404 for
+/// about a second (measured in the traffic test). Only while Envoy Gateway
+/// runs, which the old routes' own status shows: nothing waits for a
+/// status nobody writes. False when the new routes weren't taken in time.
+async fn new_routes_taken(
+    client: &Client,
+    service_id: &str,
+    wanted: &BTreeMap<(String, String), ()>,
+    before: &std::collections::BTreeSet<String>,
+) -> bool {
+    let api = api_of(client, "HTTPRoute");
+    let Ok(list) = api
+        .list(&ListParams::default().labels(&format!("{SERVICE_LABEL}={service_id}")))
+        .await
+    else {
+        return true;
+    };
+    let wanted_route = |n: &str| wanted.contains_key(&("HTTPRoute".to_owned(), n.to_owned()));
+    let serving_stale = list.items.iter().any(|o| {
+        !wanted_route(&o.name_any()) && route_accepted(&serde_json::to_value(o).unwrap_or_default())
+    });
+    let new: Vec<&str> = wanted
+        .keys()
+        .filter(|(k, n)| k == "HTTPRoute" && !before.contains(n))
+        .map(|(_, n)| n.as_str())
+        .collect();
+    if !serving_stale || new.is_empty() {
+        return true;
+    }
+    let deadline = tokio::time::Instant::now() + ROUTES_TAKEN_WAIT;
+    loop {
+        let mut all = true;
+        for n in &new {
+            let taken = match api.get_opt(n).await {
+                Ok(Some(o)) => route_accepted(&serde_json::to_value(&o).unwrap_or_default()),
+                _ => false,
+            };
+            all &= taken;
+        }
+        if all {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }
 
 /// Remove a service's objects that aren't in `wanted` (everything, when
@@ -5391,6 +5489,97 @@ mod tests {
         assert!(kube.get(&secret).is_some(), "the listener's Secret stays");
         // Nothing to retire: fine.
         retire_certificate(&client, "pyo-tls-t-none").await.unwrap();
+    }
+
+    fn accepted() -> Value {
+        json!({ "parents": [{ "parentRef": { "name": "shop-web" }, "conditions": [
+            { "type": "Accepted", "status": "True" }, { "type": "ResolvedRefs", "status": "True" } ] }] })
+    }
+
+    #[test]
+    fn a_route_is_taken_when_every_parent_accepts_it() {
+        assert!(route_accepted(&json!({ "status": accepted() })));
+        assert!(!route_accepted(&json!({})), "no status yet");
+        assert!(!route_accepted(&json!({ "status": { "parents": [] } })));
+        let mut half = accepted();
+        half["parents"][0]["conditions"][1]["status"] = json!("False");
+        assert!(!route_accepted(&json!({ "status": half })), "a reference not resolved");
+        let mut two = accepted();
+        two["parents"].as_array_mut().unwrap().push(json!({ "conditions": [{ "type": "Accepted", "status": "True" }] }));
+        assert!(!route_accepted(&json!({ "status": two })), "one parent without ResolvedRefs");
+    }
+
+    fn route_path(name: &str) -> String {
+        format!("apis/gateway.networking.k8s.io/v1/namespaces/{GATEWAY_NS}/httproutes/{name}")
+    }
+
+    /// A domain moving to the tunnel gets a route of another name: the old
+    /// one serves until Envoy Gateway took the new one, then goes.
+    #[tokio::test]
+    async fn a_renamed_route_goes_only_once_the_new_one_is_taken() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let old = route_path("shop-web-https-http");
+        kube.put(&old, json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+            "metadata": { "labels": { SERVICE_LABEL: "svc_web" } }, "spec": {}, "status": accepted() }));
+        let mut s = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
+        s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into();
+        let new = route_path("shop-web-switching-plain-http");
+        // Envoy Gateway takes the new route a moment after it's written.
+        let k = kube.clone();
+        let (n, o) = (new.clone(), old.clone());
+        let gateway = tokio::spawn(async move {
+            loop {
+                if let Some(mut r) = k.get(&n) {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    let old_there = k.get(&o).is_some();
+                    r["status"] = accepted();
+                    k.put(&n, r);
+                    return old_there;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        });
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let notes = apply(&client, &pyo, &s).await.expect("the routes");
+        assert!(gateway.await.unwrap(), "the old route served until the new one was taken");
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(kube.get(&new).is_some());
+        assert!(kube.get(&old).is_none(), "then it goes");
+    }
+
+    /// The new route never taken (Envoy Gateway down, or refusing it): the
+    /// old one keeps answering, and it's said.
+    #[tokio::test]
+    async fn the_old_route_stays_while_the_new_one_isnt_taken() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let old = route_path("shop-web-https-http");
+        kube.put(&old, json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+            "metadata": { "labels": { SERVICE_LABEL: "svc_web" } }, "spec": {}, "status": accepted() }));
+        let mut s = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
+        s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into();
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let notes = apply(&client, &pyo, &s).await.expect("the routes");
+        assert_eq!(notes, [ROUTES_WAITING]);
+        assert!(kube.get(&old).is_some(), "the old route keeps answering");
+        assert!(kube.get(&route_path("shop-web-switching-plain-http")).is_some());
+        assert!(!ROUTES_WAITING.contains(';'));
+    }
+
+    /// No status on the old routes (nothing writes it): nothing waits.
+    #[tokio::test]
+    async fn without_envoy_gateways_status_nothing_waits() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let old = route_path("shop-web-https-http");
+        kube.put(&old, json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+            "metadata": { "labels": { SERVICE_LABEL: "svc_web" } }, "spec": {} }));
+        let mut s = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
+        s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into();
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let start = std::time::Instant::now();
+        let notes = apply(&client, &pyo, &s).await.expect("the routes");
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(start.elapsed() < ROUTES_TAKEN_WAIT);
+        assert!(kube.get(&old).is_none());
     }
 
     #[tokio::test]
