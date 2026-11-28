@@ -15,8 +15,9 @@
 # - Its signature goes too. cosign keeps it as a Sigstore bundle that
 #   refers to the image, found under the tag sha256-<digest> (the OCI
 #   referrers tag), so that tag is copied.
-# - Then the copy's digest must be the source's, and cosign must find the
-#   release workflow's signature on the copy.
+# - The source must carry the release workflow's signature. Then the
+#   copy's digest must be the source's, and cosign must find the same
+#   signature on the copy.
 #
 # It needs crane and cosign, logged in to both registries.
 set -euo pipefail
@@ -43,6 +44,10 @@ retry() {
   done
   return 1
 }
+
+# Only an image the release workflow signed is copied.
+retry cosign verify "$src" --certificate-identity-regexp "$SIGNER" --certificate-oidc-issuer "$ISSUER" >/dev/null \
+  || die "$src isn't signed by the release workflow, so it isn't copied"
 
 if [ "$(crane digest "$dst" 2>/dev/null || true)" = "$digest" ]; then
   echo "$dst  there already"
