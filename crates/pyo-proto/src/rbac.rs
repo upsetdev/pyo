@@ -1890,7 +1890,7 @@ mod tests {
             "the configured image is pinned"
         );
         assert!(
-            !policy.contains("ghcr.io/upsetdev/pyo/waf"),
+            !policy.contains("ghcr.io/upsetdev/pyo-waf"),
             "not a built-in one"
         );
         assert_eq!(
@@ -2408,7 +2408,7 @@ mod tests {
     fn the_tunnel_connector_passes_the_pod_rules() {
         let d = system::tunnel_deployment(
             system::CLOUDFLARED_IMAGE,
-            Some("ghcr.io/upsetdev/pyo/agent:1.2.3"),
+            Some("ghcr.io/upsetdev/pyo-agent:1.2.3"),
             &system::tunnel_token_hash("tok"),
         );
         let pod = &d["spec"]["template"]["spec"];
@@ -2448,7 +2448,7 @@ mod tests {
         let gates = pod["initContainers"].as_array().unwrap();
         assert_eq!(gates.len(), 1);
         let g = &gates[0];
-        assert_eq!(g["image"], "ghcr.io/upsetdev/pyo/agent:1.2.3");
+        assert_eq!(g["image"], "ghcr.io/upsetdev/pyo-agent:1.2.3");
         assert_eq!(g["args"], json!([system::TUNNEL_GATE]));
         assert_eq!(g["securityContext"], c["securityContext"]);
         assert!(g.get("volumeMounts").is_none() && g.get("ports").is_none());
@@ -2635,7 +2635,7 @@ mod tests {
             "the configured image is pinned"
         );
         assert!(
-            !policy.contains("ghcr.io/upsetdev/pyo/geoip"),
+            !policy.contains("ghcr.io/upsetdev/pyo-geoip"),
             "not a built-in one"
         );
         assert_eq!(
@@ -2753,15 +2753,20 @@ mod tests {
     /// gets them with a refresh, any other with its connect command.
     /// 0.52.0: the agent may write HTTPRouteFilters (the Gateway section's
     /// anchor routes answer with one).
+    /// 0.52.1 changes no role, but Envoy Gateway's chart comes from Docker
+    /// Hub (`oci://docker.io/envoyproxy/gateway-helm`), no longer Pyo's
+    /// copy at ghcr.io/upsetdev/pyo-mirror. As with 0.51.1, a cluster gets
+    /// the chart with its connect command (the one Pyo runs on runs it by
+    /// itself), and runs on the chart it has until then.
     #[test]
-    fn the_roles_are_as_0_52_0s() {
+    fn the_roles_are_as_0_52_1s() {
         assert_eq!(
             short_hash(&json!([
                 objects(false),
                 objects(true),
                 self_update_objects()
             ])),
-            "75d1b8254c1419f7"
+            "54bfe18b32132112"
         );
     }
 
@@ -2797,10 +2802,8 @@ mod tests {
         );
         assert_eq!(access_hash_of(&policy), h);
         // Whatever images the installation runs (third-party images the
-        // code pins are part of the rules, Pyo's mirrors of them too).
-        let text = json!(policy)
-            .to_string()
-            .replace("ghcr.io/upsetdev/pyo-mirror/", "");
+        // code pins are part of the rules).
+        let text = json!(policy).to_string();
         assert!(
             !text.contains("ghcr.io/upsetdev/") && !text.contains("127.0.0.1:5005"),
             "{text}"

@@ -1,8 +1,9 @@
 name: Security scan
 
 # Every day, Trivy scans:
-# - the images of the latest release (ghcr.io/upsetdev/pyo/*, as its
-#   release.json pins them)
+# - Pyo's own images in the latest release, as its release.json pins
+#   them (ghcr.io/upsetdev/<name>, ghcr.io/upsetdev/pyo/<name> before
+#   0.52.1)
 # - the sandbox templates' images, from the latest images.json of
 #   upsetdev/pyo-sandbox-images (what Pyo runs, not the copy a release
 #   ships with)
@@ -10,14 +11,13 @@ name: Security scan
 #   databases system's (crates/pyo-proto/system: CloudNativePG, MOCO and
 #   its sidecars, MySQL), the CloudNativePG bases of
 #   deploy/images/postgres.Dockerfile, Railpack's BuildKit frontend
-#   (pyo-builder source.rs), and every image of Pyo's mirror
-#   (deploy/mirrors.txt: BuildKit, Valkey, Envoy and the rest), scanned
-#   in the mirror
+#   (pyo-builder source.rs), and the ones from Docker Hub
+#   (deploy/mirrors.txt: BuildKit, Valkey, Envoy and the rest)
 #
 # Each image has a key that finds its issue: "pyo/" and its name in
-# release.json for Pyo's own, and the source without its digest for a
-# third-party one (docker.io/valkey/valkey:8.1), wherever it's pulled
-# from. So an image that moves to the mirror keeps its issue.
+# release.json for Pyo's own, and the image without its digest for a
+# third-party one (docker.io/valkey/valkey:8.1). The keys are what they
+# were while Pyo copied these to its own mirror, so each keeps its issue.
 #
 # An image with HIGH or CRITICAL CVEs that have a fix gets one issue,
 # labelled security, listing them with their fixed versions. Each scan
@@ -59,7 +59,7 @@ jobs:
           set -euo pipefail
           tag=$(gh release view --json tagName --jq .tagName)
           gh release download "$tag" --pattern release.json --dir release
-          jq -c '[.images | to_entries[] | select(.value | startswith("ghcr.io/upsetdev/pyo/")) | {key: ("pyo/" + .key), ref: .value}]' \
+          jq -c '[.images | to_entries[] | select((.key | startswith("sandbox") | not) and (.value | startswith("ghcr.io/upsetdev/"))) | {key: ("pyo/" + .key), ref: .value}]' \
             release/release.json > pyo.json
           # The sandbox templates' images, keyed as release.json names
           # them (pyo/sandboxBase), by their dated tag when it has one.
@@ -70,16 +70,15 @@ jobs:
             sandbox/images.json > sandbox.json
           {
             # Pinned where they're used. Not MOCO's fluent-bit: it never runs
-            # (pyo-db-controller sets disableSlowQueryLogContainer). Not Pyo's
-            # mirror: it comes next, keyed by each source.
+            # (pyo-db-controller sets disableSlowQueryLogContainer).
             git grep -hoE '(docker\.io|ghcr\.io)/[a-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' -- \
               crates/pyo-proto/system deploy/images/postgres.Dockerfile crates/pyo-builder/src/source.rs \
               | grep -vE '^ghcr\.io/(cybozu-go/moco/fluent-bit:|upsetdev/)' | sort -u \
               | jq -Rc '{key: sub("@.*$"; ""), ref: .}'
-            # Each "<source> <mirror>" pair. Not Envoy Gateway's Helm chart:
-            # it isn't an image.
-            scripts/mirror-images.sh list | grep -v '/gateway-helm:' \
-              | jq -Rc 'split(" ") | {key: (.[0] | sub("@.*$"; "")), ref: .[1]}'
+            # The ones from Docker Hub (deploy/mirrors.txt). Not Envoy
+            # Gateway's Helm chart: it isn't an image.
+            scripts/check-images.sh list | grep -v '/gateway-helm:' \
+              | jq -Rc '{key: sub("@.*$"; ""), ref: .}'
           } | jq -sc 'unique_by(.key)' > third-party.json
           echo "images=$(jq -sc 'add' pyo.json sandbox.json third-party.json)" >> "$GITHUB_OUTPUT"
           echo "$tag: $(jq length pyo.json) of Pyo's images, $(jq length sandbox.json) sandbox images and $(jq length third-party.json) third-party images."

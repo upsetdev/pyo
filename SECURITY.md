@@ -11,8 +11,8 @@ Say what's affected, how to reproduce it and which version you run (it's
 under **Settings › Updates**). We'll confirm we got it, keep you posted on
 the fix and credit you in the advisory if you'd like.
 
-This covers Pyo, its CLI, its install scripts and its images at
-`ghcr.io/upsetdev/pyo`. Pyo Sandbox's templates live in
+This covers Pyo, its CLI, its install scripts and its images, listed in
+[IMAGES.md](IMAGES.md). Pyo Sandbox's templates live in
 [upsetdev/pyo-sandbox-images](https://github.com/upsetdev/pyo-sandbox-images),
 and you can report those here too.
 

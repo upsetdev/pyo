@@ -1135,7 +1135,7 @@ mod tests {
         assert!(set(&client, ID, "tok").await.ok);
         assert!(gates(&kube).is_null(), "no gate without the agent's image");
 
-        kube.put(AGENT, agent_deployment("ghcr.io/upsetdev/pyo/agent:1.2.3"));
+        kube.put(AGENT, agent_deployment("ghcr.io/upsetdev/pyo-agent:1.2.3"));
         let wanted = TunnelWanted {
             tunnel_id: Some(ID.into()),
             ports_public: true,
@@ -1143,15 +1143,15 @@ mod tests {
         follow(&client, &wanted).await;
         let g = gates(&kube);
         assert_eq!(g[0]["name"], system::TUNNEL_GATE);
-        assert_eq!(g[0]["image"], "ghcr.io/upsetdev/pyo/agent:1.2.3");
+        assert_eq!(g[0]["image"], "ghcr.io/upsetdev/pyo-agent:1.2.3");
         assert_eq!(g[0]["args"], json!(["tunnel-gate"]));
         let service = kube.get(GATE).expect("the gate's Service");
         assert_eq!(service["spec"]["ports"][0]["port"], 8092);
         // An updated agent, with no connector pod that ran the gate yet:
         // its new image.
-        kube.put(AGENT, agent_deployment("ghcr.io/upsetdev/pyo/agent:1.2.4"));
+        kube.put(AGENT, agent_deployment("ghcr.io/upsetdev/pyo-agent:1.2.4"));
         follow(&client, &wanted).await;
-        assert_eq!(gates(&kube)[0]["image"], "ghcr.io/upsetdev/pyo/agent:1.2.4");
+        assert_eq!(gates(&kube)[0]["image"], "ghcr.io/upsetdev/pyo-agent:1.2.4");
     }
 
     /// A connector pod whose gate runs `image`: done (pulled, it has an
@@ -1161,7 +1161,7 @@ mod tests {
             Some(r) => json!({ "waiting": { "reason": r } }),
             None => json!({ "terminated": { "exitCode": 0, "reason": "Completed" } }),
         };
-        let image_id = if waiting.is_some() { "" } else { "ghcr.io/upsetdev/pyo/agent@sha256:0a1b" };
+        let image_id = if waiting.is_some() { "" } else { "ghcr.io/upsetdev/pyo-agent@sha256:0a1b" };
         let mut p = tunnel_pod("10.42.0.5");
         p["spec"]["initContainers"] = json!([{ "name": system::TUNNEL_GATE, "image": image }]);
         p["status"]["initContainerStatuses"] = json!([{
@@ -1181,9 +1181,9 @@ mod tests {
         let (kube, client) = FakeKube::start().await;
         reset();
         let (v1, v2, v3) = (
-            "ghcr.io/upsetdev/pyo/agent:1.2.3",
-            "ghcr.io/upsetdev/pyo/agent:1.2.4",
-            "ghcr.io/upsetdev/pyo/agent:1.2.5",
+            "ghcr.io/upsetdev/pyo-agent:1.2.3",
+            "ghcr.io/upsetdev/pyo-agent:1.2.4",
+            "ghcr.io/upsetdev/pyo-agent:1.2.5",
         );
         let gate = |kube: &FakeKube| {
             kube.get(DEPLOYMENT).expect("the connector")["spec"]["template"]["spec"]
@@ -1248,7 +1248,7 @@ mod tests {
         let _one = SERIAL.lock().await;
         let (kube, client) = FakeKube::start().await;
         reset();
-        let (old, own) = ("ghcr.io/upsetdev/pyo/agent:1.2.3", "ghcr.io/upsetdev/pyo/agent:1.2.4");
+        let (old, own) = ("ghcr.io/upsetdev/pyo-agent:1.2.3", "ghcr.io/upsetdev/pyo-agent:1.2.4");
         let gate = |kube: &FakeKube| {
             kube.get(DEPLOYMENT).expect("the connector")["spec"]["template"]["spec"]
                 ["initContainers"][0]["image"]

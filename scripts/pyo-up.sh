@@ -35,8 +35,13 @@ BIN="$HOME/.local/bin"
 NS=pyo-system
 # Where Pyo's own images come from: built here, or a published release.
 IMAGES=127.0.0.1:5005/pyo
-RELEASE_IMAGES=ghcr.io/upsetdev/pyo
+# A release's images are all in ghcr.io/upsetdev/: Pyo's own by their flat
+# names (deploy/pyo-images.json, ghcr.io/upsetdev/pyo/<name> before
+# 0.52.1), the sandbox templates' from upsetdev/pyo-sandbox-images, signed
+# by that repo's workflows.
+RELEASE_IMAGES=ghcr.io/upsetdev
 RELEASE_SIGNER='^https://github\.com/upsetdev/pyo/\.github/workflows/release\.yml@refs/tags/v'
+SANDBOX_SIGNER='^https://github\.com/upsetdev/pyo-sandbox-images/\.github/workflows/'
 
 TTY="" BOLD="" RED="" GREEN="" CYAN="" DIM="" RESET=""
 if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
@@ -97,17 +102,19 @@ if [ "${1:-}" = "--release" ]; then
       --certificate-oidc-issuer https://token.actions.githubusercontent.com "$tmp/release.json" >/dev/null
     # Every image the release pins, read from its own release.json
     # (scripts/release-manifest.ts), so the list can't drift from it.
-    mapfile -t refs < <(sed -n '/^  "images": {/,/^  }/s/^    "[^"]*": "\([^"]*\)",*$/\1/p' "$tmp/release.json")
+    mapfile -t refs < <(sed -n '/^  "images": {/,/^  }/s/^    "\([^"]*\)": "\([^"]*\)",*$/\1 \2/p' "$tmp/release.json")
     [ "${#refs[@]}" -gt 0 ] || { echo "The release.json of $VERSION lists no images." >&2; exit 1; }
-    for ref in "${refs[@]}"; do
+    for line in "${refs[@]}"; do
+      key=${line%% *} ref=${line#* }
       case "$ref" in
         "$RELEASE_IMAGES"/*@sha256:*) ;;
         *) echo "The release.json of $VERSION has an image from elsewhere: $ref" >&2; exit 1 ;;
       esac
+      case "$key" in sandbox*) signer=$SANDBOX_SIGNER ;; *) signer=$RELEASE_SIGNER ;; esac
       image=${ref#"$RELEASE_IMAGES"/}
       log "Checking the signature of ${image%@*}"
       cosign verify "$ref" \
-        --certificate-identity-regexp "$RELEASE_SIGNER" \
+        --certificate-identity-regexp "$signer" \
         --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
     done
   fi

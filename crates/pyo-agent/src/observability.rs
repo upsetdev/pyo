@@ -30,8 +30,8 @@ const NS: &str = "pyo-system";
 /// Vector's DaemonSet and its pods' name label (platform.yaml's pyo-traffic
 /// policy lets these in).
 const VECTOR: &str = pyo_proto::traffic::VECTOR;
-/// Vector, from Pyo's mirror (deploy/mirrors.txt).
-const VECTOR_IMAGE: &str = "ghcr.io/upsetdev/pyo-mirror/timberio/vector:0.60.0-debian@sha256:3ccb4bbd36e38734394e158db1411e91a69d076ed25013f8de385046a382d36a";
+/// Vector, from Docker Hub by digest (deploy/mirrors.txt).
+const VECTOR_IMAGE: &str = "docker.io/timberio/vector:0.60.0-debian@sha256:3ccb4bbd36e38734394e158db1411e91a69d076ed25013f8de385046a382d36a";
 
 /// Reads the proxy's container log files directly (CRI format: "<time>
 /// <stream> <F|P> <line>"), so Vector needs no Kubernetes API access.

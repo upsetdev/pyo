@@ -983,10 +983,10 @@ mod tests {
     /// build (laptop dev) and a fully set install (pyo.yaml) do.
     #[test]
     fn release_builds_need_every_image() {
-        let all = |_: &str| Some("ghcr.io/upsetdev/pyo/x:1@sha256:00".to_owned());
+        let all = |_: &str| Some("ghcr.io/upsetdev/pyo-x:1@sha256:00".to_owned());
         let some = |k: &str| {
             matches!(k, "PYO_AGENT_IMAGE" | "PYO_BUILDER_IMAGE")
-                .then(|| "ghcr.io/upsetdev/pyo/x:1@sha256:00".to_owned())
+                .then(|| "ghcr.io/upsetdev/pyo-x:1@sha256:00".to_owned())
         };
         assert!(check_images(false, false, all).is_ok());
         assert!(check_images(true, false, |_| None).is_ok());
@@ -1009,7 +1009,7 @@ mod tests {
     /// one line.
     #[test]
     fn multi_tenant_needs_every_image_in_any_build() {
-        let all = |_: &str| Some("ghcr.io/upsetdev/pyo/x:1@sha256:00".to_owned());
+        let all = |_: &str| Some("ghcr.io/upsetdev/pyo-x:1@sha256:00".to_owned());
         let some = |k: &str| (k != "PYO_STATIC_IMAGE").then(|| "img".to_owned());
         for debug in [true, false] {
             assert!(check_images(debug, true, all).is_ok());

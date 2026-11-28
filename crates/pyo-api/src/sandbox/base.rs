@@ -450,7 +450,7 @@ mod tests {
         // An older Pyo (0.4.x, Debian from release.json) never moves it
         // back, and the images move it from there.
         let debian = json!({ "kind": "image", "os": "Debian 13", "release": "0.4.1",
-            "image": "ghcr.io/upsetdev/pyo/sandbox-base:0.4.1@sha256:aaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" });
+            "image": "ghcr.io/upsetdev/pyo-sandbox-base:0.4.1@sha256:aaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" });
         assert_eq!(decide(Some(&debian), &new), Seed::Move);
         let older_pyo = Wanted {
             image: debian["image"].as_str().unwrap().into(),
