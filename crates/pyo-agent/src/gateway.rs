@@ -2886,10 +2886,15 @@ pub fn policy_covers(p: &DynamicObject, gateway: &str, section: &str) -> bool {
 }
 
 /// The connectors' pods moved (`old` → `pods`): every tunnel policy
-/// trusts the new ones. Refused by an older install: said, and kept.
+/// trusts the new ones. Each is written in this release's form (its
+/// listeners and trusted ranges kept, the websites' settings as they
+/// are): one an older agent wrote is refused as it is by this release's
+/// admission policy, and the update from 0.51.0 left a new connector
+/// untrusted that way. Refused by an older install: said, and kept.
 pub async fn set_tunnel_pods(client: &Client, old: &[String], pods: &[String]) -> anyhow::Result<()> {
     let policies = api_of(client, "ClientTrafficPolicy");
     let found = tunnel_policies(client).await?;
+    let w = web_settings(client).await?;
     for p in found {
         let name = p.name_any();
         let mut o = json!({
@@ -2897,6 +2902,7 @@ pub async fn set_tunnel_pods(client: &Client, old: &[String], pods: &[String]) -
             "metadata": { "name": name, "namespace": GATEWAY_NS, "labels": p.labels() },
             "spec": p.data["spec"].clone(),
         });
+        rewrite_cdn_policy(&mut o, w);
         set_trusted(&mut o, |have| with_pods(have, old, pods));
         if let Err(e) = write_client_policy(&policies, &name, &o).await {
             if crate::refused::is_refusal(&e) {

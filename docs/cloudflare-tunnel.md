@@ -994,7 +994,13 @@ seconds, so its address must be trusted before cloudflared starts.
   phase `Succeeded` or `Failed` doesn't count: Kubernetes gives its
   address to another pod.
 - A new address is written into every tunnel client policy at once
-  (`gateway::set_tunnel_pods`).
+  (`gateway::set_tunnel_pods`). Each policy is written in this release's
+  form: its listeners and trusted ranges are kept, and the websites'
+  settings are as they are. A policy an older agent wrote is refused as
+  it is by this release's admission policy. During the update from 0.51.0
+  that refusal left a new connector untrusted on that policy. It also
+  marked the tunnel as refused, which stopped every repair, until the
+  service's routes were written again.
 - An address is removed only after its pod object is gone. A stopping
   pod still finishes requests. The removal goes out with the next new
   address, or 60 s after the last pod went. Each rewrite makes Envoy

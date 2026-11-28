@@ -1556,6 +1556,36 @@ mod tests {
         assert_eq!(gate_answer(Some("ip=10.42.0.5")), "yes");
     }
 
+    /// A tunnel policy as an older agent wrote it, which this release's
+    /// admission policy refuses as it is (the update from 0.51.0): the
+    /// watch writes it in this release's form, so a new connector is
+    /// trusted at once, its listeners stay, and the tunnel isn't taken
+    /// for refused (which would stop every repair).
+    #[tokio::test]
+    async fn a_policy_an_older_agent_wrote_still_gets_a_new_connector() {
+        let _one = SERIAL.lock().await;
+        let (kube, client) = FakeKube::start().await;
+        reset();
+        let mut old = tunnel_policy(&["10.42.0.5/32"], 1, 1);
+        old["spec"]["targetRefs"] = json!([{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "shop-web", "sectionName": "h-1" }]);
+        kube.put(POLICY, old);
+        // Only this release's form gets through (it removes visitor headers).
+        kube.admit(|w| {
+            (w.plural == "clienttrafficpolicies" && w.body["spec"].get("headers").is_none())
+                .then(|| (422, "Pyo's agent only writes its own objects, with exactly the content this release defines.".into()))
+        });
+        kube.put(&pod_path("pyo-tunnel-a"), tunnel_pod("10.42.0.5"));
+        kube.put(&pod_path("pyo-tunnel-b"), tunnel_pod("10.42.1.9"));
+        follow_pods(&client).await.unwrap();
+        assert_eq!(trusted_in(&kube), ["10.42.0.5/32", "10.42.1.9/32"]);
+        assert!(kube.refused().is_empty(), "{:?}", kube.refused());
+        assert!(!REFUSED_NOW.load(Ordering::Relaxed));
+        let p = kube.get(POLICY).unwrap();
+        assert_eq!(p["spec"]["targetRefs"][0]["sectionName"], "h-1");
+        assert_eq!(p["spec"]["targetRefs"][0]["name"], "shop-web");
+        assert!(p["spec"]["tls"].get("clientValidation").is_none(), "{p}");
+    }
+
     /// A tunnel route on a listener no tunnel policy covers: that listener
     /// trusts no connector, so nothing is in effect until a policy covers
     /// it. Then the gate opens as usual.
