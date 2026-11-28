@@ -5524,20 +5524,30 @@ mod tests {
         let mut s = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
         s.domains[0].tunnel = pyo_proto::TUNNEL_SWITCHING.into();
         let new = route_path("shop-web-switching-plain-http");
-        // Envoy Gateway takes the new route a moment after it's written.
+        // Every route the service now has (the switching one, its anchor,
+        // plain HTTP): Envoy Gateway takes them a moment after they're
+        // written.
+        let routes: Vec<String> = route_objects(&s)
+            .objects
+            .iter()
+            .filter(|o| o["kind"] == "HTTPRoute")
+            .map(|o| route_path(o["metadata"]["name"].as_str().unwrap()))
+            .collect();
+        assert!(routes.contains(&new) && routes.len() > 1, "{routes:?}");
         let k = kube.clone();
-        let (n, o) = (new.clone(), old.clone());
+        let o = old.clone();
         let gateway = tokio::spawn(async move {
-            loop {
-                if let Some(mut r) = k.get(&n) {
-                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                    let old_there = k.get(&o).is_some();
-                    r["status"] = accepted();
-                    k.put(&n, r);
-                    return old_there;
-                }
+            while routes.iter().any(|n| k.get(n).is_none()) {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            let old_there = k.get(&o).is_some();
+            for n in &routes {
+                let mut r = k.get(n).unwrap();
+                r["status"] = accepted();
+                k.put(n, r);
+            }
+            old_there
         });
         let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
         let notes = apply(&client, &pyo, &s).await.expect("the routes");
