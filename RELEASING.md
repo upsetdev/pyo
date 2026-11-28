@@ -799,6 +799,11 @@ under `ghcr.io/upsetdev/pyo/`), its keys in `release.json`, and one line
 on what it is. `scripts/release-manifest.ts` reads it, and tests check
 the release workflow and `ReleaseImages` against it.
 
+`IMAGES.md` lists every image Pyo runs. `scripts/images-md.ts` writes it
+from `deploy/pyo-images.json` and `deploy/mirrors.txt`. After changing
+either, run `bun run scripts/images-md.ts` and commit `IMAGES.md`. CI's
+**Image sources** job fails while it's out of date.
+
 The manifests in `deploy/k8s` keep the short placeholders
 (`__IMAGES__/agent:__TAG__`). Pyo 0.4.0 checks a release's `*_IMAGE` env
 vars by those names (`manifests_pass_older_pyos_checks`).

@@ -152,6 +152,7 @@ It keeps your volumes' data unless you add `--purge`. Back up first: see
 [Uninstalling Pyo](https://pyo.dev/docs/uninstall).
 
 Building from source or contributing? See [CONTRIBUTING.md](CONTRIBUTING.md).
+Every image Pyo runs is listed in [IMAGES.md](IMAGES.md).
 
 ## Projects
 

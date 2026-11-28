@@ -253,7 +253,8 @@ jobs:
 
   # Every image Pyo runs comes from an allowed registry, and each
   # third-party one from Docker Hub is listed in deploy/mirrors.txt with
-  # its digest. Then each listed digest is still at Docker Hub (read only).
+  # its digest. IMAGES.md matches the lists. Then each listed digest is
+  # still at Docker Hub (read only).
   images:
     name: Image sources
     runs-on: ubuntu-24.04
@@ -263,6 +264,12 @@ jobs:
           persist-credentials: false
       - name: Every image is pinned and listed
         run: scripts/check-images.sh
+      # IMAGES.md is made from deploy/pyo-images.json and deploy/mirrors.txt.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: IMAGES.md is up to date
+        run: bun run scripts/images-md.ts --check
       - uses: ./.github/actions/crane
       - name: The listed digests are at Docker Hub
         run: scripts/check-images.sh upstream

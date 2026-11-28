@@ -8,38 +8,44 @@
 # here with the same digest, when one listed isn't used, or when an image
 # comes from a registry not on its list. `check-images.sh upstream` checks
 # each digest is still at Docker Hub. release.json lists them under
-# "mirrors" (the name older releases gave the list).
+# "mirrors" (the name older releases gave the list). IMAGES.md is made
+# from it (scripts/images-md.ts), with the comment above each image.
 #
 # To add or bump one: change it here and where it's used, with the digest
 # of its multi-platform index as Docker Hub gives it.
 
-# Pyo's own registry, and the port forward to it (platform.yaml, connect.sh).
+# Pyo's own registry (platform.yaml, connect.sh).
 docker.io/library/registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+# The port forward to Pyo's registry (platform.yaml, connect.sh).
 docker.io/alpine/socat:1.8.1.3@sha256:5aa280c6fc5bee94dbd2bbdf2a58d30f50396eaa110be84b03636945b157ae68
 # Builds (platform.yaml, pyo-agent builder.rs).
 docker.io/moby/buildkit:v0.35.1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c
 # Pyo's database, and pg_dump for backups (platform.yaml, pyo-proto db_tools_image).
 docker.io/library/postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b
-# Analytics and the backup store (platform.yaml).
+# Analytics (platform.yaml).
 docker.io/clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
+# The backup store (platform.yaml).
 docker.io/dxflrs/garage:v2.5.0@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5
-# The agent's helpers: logs and figures, address checks, Cloudflare
-# Tunnel, backups (pyo-agent, pyo-proto).
+# Logs and figures (pyo-agent observability.rs).
 docker.io/timberio/vector:0.60.0-debian@sha256:3ccb4bbd36e38734394e158db1411e91a69d076ed25013f8de385046a382d36a
+# A server's public address check (pyo-agent locate.rs).
 docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+# The Cloudflare Tunnel connector (pyo-proto system.rs).
 docker.io/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba
+# Volume backups (pyo-agent backup.rs).
 docker.io/restic/restic:0.17.3@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a
-# Client tools for backing up services' own databases (pyo-proto db_tools_image).
+# Client tools to back up services' own MySQL, MariaDB and MongoDB (pyo-proto db_tools_image).
 docker.io/library/mysql:8.4@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00
 docker.io/library/mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc
 docker.io/library/mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01
-# KV databases: Valkey by version, and Valkey 8.1 with its modules
-# (system/databases/controller.yaml, pyo-db-controller).
+# KV databases, by Valkey version (system/databases/controller.yaml, pyo-db-controller).
 docker.io/valkey/valkey:8.0@sha256:fcb69dfef81599baefeee6cdd0b8339b61b7983a8ee08d307e44844db5bd7047
 docker.io/valkey/valkey:8.1@sha256:5032c4dd7abe08d6fd9382054608183e2bf1f7e3895ef619b8784698454325f7
+# KV databases with modules: Valkey 8.1 (pyo-db-controller).
 docker.io/valkey/valkey-bundle:8.1.12@sha256:ca9d1c30a6b3c30de34691ff5ddff6fb77f5c8c727a63723c62d8ebd280e7921
-# Pyo Gateway: Envoy Gateway's chart, its controller and the proxies
-# (pyo-proto system.rs).
+# Pyo Gateway: Envoy Gateway's Helm chart (pyo-proto system.rs).
 docker.io/envoyproxy/gateway-helm:v1.9.3@sha256:be1b8f163a338f94e7d6532336c08d6856fc70a0b790ac14a2826a54d23e0dd3
+# Pyo Gateway: Envoy Gateway's controller (pyo-proto system.rs).
 docker.io/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f
+# Pyo Gateway: the proxies (pyo-proto system.rs).
 docker.io/envoyproxy/envoy:distroless-v1.39.5@sha256:9d84a586119a27b50437dbb01eccd4722832741539b1ed53c8e9d6da6067a6e0

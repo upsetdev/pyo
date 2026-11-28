@@ -11,7 +11,7 @@
     { "name": "pyo-db-controller", "placeholder": "db-controller", "keys": ["dbController"], "about": "Runs Pyo's built-in databases" },
     { "name": "pyo-kv", "placeholder": "kv", "keys": ["kv"], "about": "REST API in front of a KV database (Valkey)" },
     { "name": "pyo-static", "placeholder": "static", "keys": ["static"], "about": "Serves static sites" },
-    { "name": "pyo-postgres", "placeholder": "postgres", "keys": ["postgres16", "postgres17", "postgres18"], "about": "PostgreSQL 16, 17 and 18 for databases, tagged <major>-<version>" },
+    { "name": "pyo-postgres", "placeholder": "postgres", "keys": ["postgres16", "postgres17", "postgres18"], "about": "PostgreSQL 16, 17 and 18 for databases, tagged `<major>-<version>`" },
     { "name": "pyo-mysql-operator", "placeholder": "mysql-operator", "keys": ["mysqlOperator"], "about": "MySQL operator (MOCO, patched)" },
     { "name": "pyo-mysql-backup", "placeholder": "mysql-backup", "keys": ["mysqlBackup"], "about": "MySQL backups (MOCO, patched)" },
     { "name": "pyo-sandbox-base", "keys": ["sandboxBase"], "about": "Sandbox template base (Ubuntu 24.04)", "builtBy": "upsetdev/pyo-sandbox-images", "publishedAs": "ghcr.io/upsetdev/pyo-sandbox-images/base" },
