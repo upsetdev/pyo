@@ -2753,15 +2753,20 @@ mod tests {
     /// gets them with a refresh, any other with its connect command.
     /// 0.52.0: the agent may write HTTPRouteFilters (the Gateway section's
     /// anchor routes answer with one).
+    /// 0.52.1 changes no role, but Envoy Gateway's chart comes from Docker
+    /// Hub (`oci://docker.io/envoyproxy/gateway-helm`), no longer Pyo's
+    /// copy at ghcr.io/upsetdev/pyo-mirror. As with 0.51.1, a cluster gets
+    /// the chart with its connect command (the one Pyo runs on runs it by
+    /// itself), and runs on the chart it has until then.
     #[test]
-    fn the_roles_are_as_0_52_0s() {
+    fn the_roles_are_as_0_52_1s() {
         assert_eq!(
             short_hash(&json!([
                 objects(false),
                 objects(true),
                 self_update_objects()
             ])),
-            "75d1b8254c1419f7"
+            "54bfe18b32132112"
         );
     }
 
