@@ -23,6 +23,8 @@ import type { Cluster, GatewayServerPart, GatewaySettings } from "~/lib/pyo/type
 // gateway's parts on each server, and a few settings for the whole cluster.
 // HTTP/3 and the TLS minimum drop open connections once, and say so before
 // they're saved. Compression and the timeout defaults change routes only.
+// PROXY protocol saves on its own, through setClusterPaths, after its
+// confirm.
 
 function partLine(p: { ready: boolean; version: string; reason?: string | null; startedAt?: number | null }) {
   const tone: Tone = p.ready ? "success" : "danger";
@@ -39,6 +41,7 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
   const [form, setForm] = useState<GatewayForm>(() => formOf(saved));
   const [confirming, setConfirming] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [proxy, setProxy] = useState<boolean | null>(null);
   // A save elsewhere (another tab, the CLI) shows here once nothing's typed.
   const savedKey = JSON.stringify(saved);
   const [base, setBase] = useState(savedKey);
@@ -78,6 +81,13 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
     return "Needs UDP port 443 open to every server.";
   })();
   const tlsApplying = status && status.tlsMin && saved.tlsMin !== status.tlsMin;
+  const proxyOn = !!(c.proxyProtocol ?? c.webProxyProtocol);
+
+  const saveProxy = async (on: boolean) => {
+    setProxy(null);
+    const r = await api.setClusterPaths(c.id, { proxyProtocol: on });
+    if (r?.ok) toast({ title: on ? "PROXY protocol on" : "PROXY protocol off", description: c.name });
+  };
 
   return (
     <Panel title="Gateway" actions={<LearnMore page="gateway" />}>
@@ -153,6 +163,13 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
             ]}
           />
         </div>
+        <Switch
+          checked={proxyOn}
+          disabled={!admin || (!proxyOn && !publicOn)}
+          onChange={setProxy}
+          label="PROXY protocol"
+          description={publicOn ? "Only for a load balancer that sends it on every connection." : "Turn on public ports first."}
+        />
       </div>
       <div className="space-y-3 border-t border-border px-4 py-3">
         <p className="text-[13px] font-medium">Service defaults</p>
@@ -206,6 +223,17 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
           }
           confirmLabel="Save"
           onConfirm={() => void save()}
+        />
+      ) : null}
+      {proxy !== null ? (
+        <ConfirmDialog
+          open
+          onClose={() => setProxy(null)}
+          tone="primary"
+          title={`Turn ${proxy ? "on" : "off"} PROXY protocol on ${c.name}?`}
+          description={`Open connections to every website on ${c.name} drop once. WebSockets and uploads in progress are cut.`}
+          confirmLabel="Save"
+          onConfirm={() => void saveProxy(proxy)}
         />
       ) : null}
     </Panel>

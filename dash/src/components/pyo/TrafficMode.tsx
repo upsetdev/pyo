@@ -116,7 +116,6 @@ function names(xs: string[]) {
 /** A change waiting for its confirm. */
 type Pending =
   | { kind: "public" | "tunnel" | "tailnet"; domains: PathDomain[] }
-  | { kind: "proxy"; on: boolean }
   | { kind: "tailnetOn" }
   | { kind: "publicOn" }
   | { kind: "ports" };
@@ -235,8 +234,6 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
 
   const go = () => {
     if (!pending) return;
-    if (pending.kind === "proxy")
-      return void send({ proxyProtocol: pending.on }, pending.on ? "PROXY protocol on" : "PROXY protocol off");
     if (pending.kind === "ports") return void send({ publicPorts: false }, "TCP and UDP ports closed");
     if (pending.kind === "tailnetOn") return void send({ tailnet: true }, "Tailscale on");
     if (pending.kind === "publicOn") return void send({ public: true }, "Public ports on");
@@ -310,14 +307,6 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
           confirm: "Turn on",
           lines: [DASHBOARD_DROPS],
         };
-      case "proxy":
-        return {
-          title: `Turn ${pending.on ? "on" : "off"} PROXY protocol on ${c.name}?`,
-          confirm: "Save",
-          lines: [
-            `Open connections to every website on ${c.name} drop once. WebSockets and uploads in progress are cut.`,
-          ],
-        };
       case "ports":
         return {
           title: `Close TCP and UDP ports on ${c.name}?`,
@@ -359,13 +348,6 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
         disabled={!admin}
         onChange={(on) => toggle("public", on)}
       >
-        <Switch
-          checked={!!(c.proxyProtocol ?? c.webProxyProtocol)}
-          disabled={!admin}
-          onChange={(on) => setPending({ kind: "proxy", on })}
-          label="PROXY protocol"
-          description="Only for a load balancer that sends it on every connection."
-        />
         {hasPorts ? (
           paths.public ? (
             <p className="flex flex-wrap justify-between gap-2 text-[13px]">
@@ -410,7 +392,7 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
         <ConfirmDialog
           open
           onClose={() => setPending(null)}
-          tone={pending?.kind === "proxy" || pending?.kind === "tailnetOn" || pending?.kind === "publicOn" ? "primary" : "danger"}
+          tone={pending?.kind === "tailnetOn" || pending?.kind === "publicOn" ? "primary" : "danger"}
           title={dialog.title}
           description={
             <div className="space-y-1.5">
