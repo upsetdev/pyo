@@ -1530,6 +1530,45 @@ mod tests {
     }
 
     #[test]
+    fn release_json_comes_from_api_pyo_dev_when_github_fails() {
+        const COPY: &str = "https://api.pyo.dev/v1/releases/download";
+        let w = World::new("0.51.0");
+        w.live("0.52.0");
+        w.release("0.52.0", Some(b"new"));
+        // GitHub is down for release.json and its signature: api.pyo.dev
+        // has the same bytes.
+        for file in ["release.json", "release.json.sigstore.json"] {
+            let mut routes = w.http.routes.borrow_mut();
+            let answer = routes.remove(&format!("{GITHUB}/v0.52.0/{file}")).unwrap();
+            routes.insert(format!("{COPY}/v0.52.0/{file}"), answer);
+        }
+        let r = w.run();
+        assert_eq!(r.outcome, Outcome::HandedOver, "{}", r.message);
+        let calls = w.http.calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .any(|u| u == &format!("{COPY}/v0.52.0/release.json"))
+        );
+        // The binary isn't copied: it comes from GitHub only.
+        assert!(
+            !calls
+                .iter()
+                .any(|u| u.starts_with(COPY) && u.contains("pyo-verify"))
+        );
+        drop(calls);
+
+        // Nowhere: GitHub's reason is shown, and nothing moves.
+        let w = World::new("0.51.0");
+        w.live("0.52.0");
+        w.route(&format!("{GITHUB}/v0.52.0/pyo-verify-linux-x86_64"), b"new");
+        let r = w.run();
+        assert_eq!(r.outcome, Outcome::Failed);
+        assert!(r.message.contains("github.com"), "{}", r.message);
+        w.assert_unchanged();
+    }
+
+    #[test]
     fn a_mirror_or_a_folder_can_stand_in_for_github() {
         // A folder (air gaps, tests). It is as untrusted as the network.
         let w = World::new("0.51.0");

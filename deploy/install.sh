@@ -740,10 +740,16 @@ tries() {
   "$@"
 }
 
+# api.pyo.dev keeps a copy of each release's description, release.json and
+# its signature, for when GitHub is down. Not with a mirror.
+RELEASE_COPIES=https://api.pyo.dev/v1/releases
+github_source() { [ "$SOURCE" = https://api.github.com/repos/upsetdev/pyo ]; }
+
 # The release this script installs: the latest, or --version's (GitHub's
 # description of it, with its assets' download addresses). The latest comes
 # from api.pyo.dev first, which keeps a copy of GitHub's answer and still
-# has it when GitHub fails or limits this address, and from GitHub next. A
+# has it when GitHub fails or limits this address, and from GitHub next.
+# --version's comes from GitHub first, and from api.pyo.dev's copy next. A
 # mirror (PYO_UPDATE_SOURCE) is the only place asked. Each gets a few tries,
 # and why each failed goes to stderr. It sends no install ID and no
 # version, so a lookup counts nothing.
@@ -751,6 +757,7 @@ release_meta() {
   local urls=() url i out why
   if [ -n "$VERSION" ]; then
     urls=("$SOURCE/releases/tags/v$VERSION")
+    ! github_source || urls+=("$RELEASE_COPIES/tags/v$VERSION")
   else
     [ "$SOURCE" != https://api.github.com/repos/upsetdev/pyo ] || urls=(https://api.pyo.dev/v1/releases/latest)
     urls+=("$SOURCE/releases/latest")
@@ -779,6 +786,19 @@ release_meta() {
 # One of the release's assets' download address.
 asset_url() {
   grep -o "\"browser_download_url\": *\"[^\"]*/$1\"" | head -n1 | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+# One of the release's files into $4: release.json or its signature, from
+# GitHub ($3), or from api.pyo.dev's copy when that fails. $1: GitHub's
+# description of the release, $2: the file's name.
+fetch_release_file() {
+  local tag
+  tries fetch -o "$4" "$3" && return 0
+  github_source || return 1
+  tag=$(printf '%s' "$1" | grep -o '"tag_name": *"[^"]*"' | head -n1 | sed 's/.*"\([^"]*\)"$/\1/')
+  [[ $tag =~ ^v[0-9][0-9A-Za-z.-]{0,47}$ ]] || return 1
+  echo "  Couldn't download $2 from GitHub. Trying api.pyo.dev's copy." >&2
+  tries fetch -o "$4" "$RELEASE_COPIES/download/$tag/$2"
 }
 
 # connect.sh of the same release, into $1 (uninstalling from a k3s that
@@ -818,7 +838,8 @@ verify_release() {
   local bundle
   bundle=$(printf '%s' "$2" | asset_url 'release\.json\.sigstore\.json')
   [ -n "$bundle" ] || fail "$1 has no signature for its release.json (release.json.sigstore.json), so it can't be trusted."
-  tries fetch -o "$WORK/release.json.sigstore.json" "$bundle" || fail "Couldn't download $bundle."
+  fetch_release_file "$2" release.json.sigstore.json "$bundle" "$WORK/release.json.sigstore.json" ||
+    fail "Couldn't download $1's signature (release.json.sigstore.json). Check this machine can reach github.com, then run the same command again."
   say "Checking the release's signature"
   find_cosign
   "$COSIGN" verify-blob --bundle "$WORK/release.json.sigstore.json" \
@@ -848,7 +869,8 @@ fetch_release() {
   }
   asset=$(printf '%s' "$meta" | asset_url 'release\.json')
   [ -n "$asset" ] || fail "$what has no release.json, so it can't be installed with this script."
-  tries fetch -o "$WORK/release.json" "$asset" || fail "Couldn't download $asset."
+  fetch_release_file "$meta" release.json "$asset" "$WORK/release.json" ||
+    fail "Couldn't download $what's release.json. Check this machine can reach github.com, then run the same command again."
   [ "$(wc -c < "$WORK/release.json")" -lt 4194304 ] || fail "release.json is too large."
   verify_release "$what" "$meta"
 

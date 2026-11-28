@@ -7,7 +7,9 @@
 //!   installs, and GitHub itself when that fails or is slow. With "Send
 //!   anonymous usage counts" on, the request carries a random install ID
 //!   and the version, nothing else. It starts off on a fresh install whose
-//!   installer was told `PYO_TELEMETRY=off`. `PYO_UPDATE_CHECK=off` turns checking
+//!   installer was told `PYO_TELEMETRY=off`. `release.json` and its
+//!   signature come from GitHub, and from api.pyo.dev's copy of them when
+//!   GitHub's download fails. `PYO_UPDATE_CHECK=off` turns checking
 //!   off, for installs that can't reach GitHub, and so sends nothing.
 //! - Applying (an admin's "Update now", or the maintenance window when
 //!   updates are automatic): the agent on Pyo's own cluster runs the new
@@ -41,6 +43,11 @@ pub const REPO: &str = "upsetdev/pyo";
 /// GitHub's latest release of [`REPO`], through api.pyo.dev, which counts
 /// active installs by install ID and version.
 const RELEASES_API: &str = "https://api.pyo.dev/v1/releases/latest";
+/// api.pyo.dev's copies of each release's release.json and its signature,
+/// for when GitHub's download fails. The signature is checked the same way.
+const RELEASE_COPIES: &str = "https://api.pyo.dev/v1/releases/download";
+/// The files api.pyo.dev keeps a copy of.
+const COPIED_FILES: &[&str] = &["release.json", "release.json.sigstore.json"];
 /// After this, GitHub is asked instead.
 const RELEASES_API_TIMEOUT: Duration = Duration::from_secs(10);
 const CHECK_EVERY_MS: i64 = 6 * 3_600_000;
@@ -428,6 +435,51 @@ async fn download(http: &reqwest::Client, asset: &GhAsset, tag: &str) -> anyhow:
     body_limited(res, MAX_ASSET).await
 }
 
+/// Where api.pyo.dev keeps its copy of a release's file, if it keeps one.
+/// None for other files, for a tag that isn't a plain release tag, and with
+/// a mirror (then the mirror is the only place asked).
+fn copy_url(tag: &str, name: &str, mirror: bool) -> Option<String> {
+    let plain = tag.len() <= 48
+        && tag.starts_with('v')
+        && tag[1..].starts_with(|c: char| c.is_ascii_digit())
+        && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    (!mirror && plain && COPIED_FILES.contains(&name))
+        .then(|| format!("{RELEASE_COPIES}/{tag}/{name}"))
+}
+
+/// One of a release's assets from GitHub, or from api.pyo.dev's copy when
+/// GitHub fails.
+async fn download_or_copy(
+    http: &reqwest::Client,
+    asset: &GhAsset,
+    tag: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let github = match download(http, asset, tag).await {
+        Ok(bytes) => return Ok(bytes),
+        Err(e) => e,
+    };
+    let Some(url) = copy_url(tag, &asset.name, mirror().is_some()) else {
+        return Err(github);
+    };
+    tracing::info!(
+        error = %format!("{github:#}"),
+        "GitHub's download failed, trying api.pyo.dev's copy"
+    );
+    let copy = async {
+        let res = http.get(&url).timeout(RELEASES_API_TIMEOUT).send().await?;
+        if !res.status().is_success() {
+            anyhow::bail!("api.pyo.dev answered {}", res.status());
+        }
+        body_limited(res, MAX_ASSET).await
+    };
+    copy.await.map_err(|e| {
+        anyhow::anyhow!(
+            "downloading {tag}'s {} failed from GitHub ({github:#}) and from api.pyo.dev ({e:#})",
+            asset.name
+        )
+    })
+}
+
 /// The latest release from api.pyo.dev, with the install ID when usage
 /// counts are on, and this version.
 async fn from_releases_api(
@@ -508,8 +560,8 @@ pub async fn fetch(install_id: Option<&str>) -> anyhow::Result<Option<Found>> {
             gh.tag_name
         );
     };
-    let json = download(&http, asset, &gh.tag_name).await?;
-    let bundle = download(&http, signature, &gh.tag_name).await?;
+    let json = download_or_copy(&http, asset, &gh.tag_name).await?;
+    let bundle = download_or_copy(&http, signature, &gh.tag_name).await?;
     crate::sigstore::verify(
         &json,
         &String::from_utf8_lossy(&bundle),
@@ -1938,6 +1990,33 @@ mod tests {
         assert!(
             blockers(&r, &[cluster(true, 1, true)], false)[0].contains("update to 98.0.0 first")
         );
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    #[test]
+    fn copies_are_asked_for_release_json_and_its_signature_only() {
+        assert_eq!(
+            copy_url("v0.52.0", "release.json", false).as_deref(),
+            Some("https://api.pyo.dev/v1/releases/download/v0.52.0/release.json")
+        );
+        assert_eq!(
+            copy_url("v0.52.0-rc.1", "release.json.sigstore.json", false).as_deref(),
+            Some(
+                "https://api.pyo.dev/v1/releases/download/v0.52.0-rc.1/release.json.sigstore.json"
+            )
+        );
+        // Other files stay on GitHub.
+        assert_eq!(copy_url("v0.52.0", "pyo-linux-x86_64", false), None);
+        // A tag from the answer is untrusted: nothing that leaves the path.
+        for tag in ["", "v", "0.52.0", "v0.52.0/../x", "v0.52.0?x=1", "vx", "v0.52.0#"] {
+            assert_eq!(copy_url(tag, "release.json", false), None, "{tag}");
+        }
+        // With a mirror, the mirror is the only place asked.
+        assert_eq!(copy_url("v0.52.0", "release.json", true), None);
     }
 }
 
