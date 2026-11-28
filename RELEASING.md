@@ -725,6 +725,19 @@ for and rolled back on failure. On an update it honours `minFrom`, shows
 terminal it refuses until you pass it). It never goes back a version and never
 removes data. `PYO_UPDATE_SOURCE` points it at a mirror, as for Pyo itself.
 
+### When GitHub is down
+
+api.pyo.dev keeps a copy of each published release's description,
+`release.json` and `release.json.sigstore.json` (its cron copies new
+releases every 10 minutes). `install.sh`, the dashboard's update check and
+`pyo-verify` ask GitHub first and use the copy when GitHub fails. The
+signature is checked the same way, so the copy can't change what's
+installed. With `PYO_UPDATE_SOURCE` set, only the mirror is asked.
+
+Not covered yet: a fresh install and a join still download k3s, cosign
+(when it isn't installed) and `pyo-verify` from GitHub, and Pyo's images
+come from ghcr.io.
+
 From a repo copy, `scripts/pyo-up.sh --release 0.1.0` checks the signature of
 the release's `release.json` and of every image in it with `cosign`, and then
 runs `deploy/install.sh`. Without cosign it stops, unless you add

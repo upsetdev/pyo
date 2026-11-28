@@ -15,6 +15,13 @@ pub const GITHUB_HOSTS: &[&str] = &[
     "release-assets.githubusercontent.com",
 ];
 const GITHUB_RELEASES: &str = "https://github.com/upsetdev/pyo/releases/download";
+/// api.pyo.dev's copies of each release's release.json and its signature,
+/// laid out like GitHub's, for when GitHub's download fails. As untrusted
+/// as GitHub: the signature is checked the same way.
+const RELEASE_COPIES: &str = "https://api.pyo.dev/v1/releases/download";
+const COPY_HOSTS: &[&str] = &["api.pyo.dev"];
+/// The files api.pyo.dev keeps a copy of.
+const COPIED_FILES: &[&str] = &["release.json", "release.json.sigstore.json"];
 const MAX_REDIRECTS: usize = 5;
 
 pub const MAX_ANSWER: usize = 4 * 1024;
@@ -110,12 +117,27 @@ impl Source {
         max: usize,
     ) -> Result<Vec<u8>, Problem> {
         match self {
-            Source::GitHub => get(
-                env,
-                &format!("{GITHUB_RELEASES}/v{version}/{file}"),
-                max,
-                GITHUB_HOSTS,
-            ),
+            Source::GitHub => {
+                let github = get(
+                    env,
+                    &format!("{GITHUB_RELEASES}/v{version}/{file}"),
+                    max,
+                    GITHUB_HOSTS,
+                );
+                match github {
+                    Err(e) if COPIED_FILES.contains(&file) => {
+                        get(
+                            env,
+                            &format!("{RELEASE_COPIES}/v{version}/{file}"),
+                            max,
+                            COPY_HOSTS,
+                        )
+                        // Both failed: GitHub's reason is the one to show.
+                        .map_err(|_| e)
+                    }
+                    other => other,
+                }
+            }
             Source::Mirror(base) => {
                 let host = origin(base).map(|(_, h)| h).unwrap_or_default();
                 get(env, &format!("{base}/v{version}/{file}"), max, &[&host])

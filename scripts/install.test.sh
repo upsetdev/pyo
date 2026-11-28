@@ -169,9 +169,43 @@ answers=""
 WORK=$(mktemp -d)
 out=$( (fetch_release) 2>&1 || true)
 rm -rf "$WORK"
-check "--version asks GitHub for that release" "$(cat "$asked")" "^https://api.github.com/repos/upsetdev/pyo/releases/tags/v1.2.3" has
-check "once, when it isn't there" "$(wc -l <"$asked")" "^1$" has
+check "--version asks GitHub for that release" "$(head -n1 "$asked")" "^https://api.github.com/repos/upsetdev/pyo/releases/tags/v1.2.3" has
+check "then api.pyo.dev's copy" "$(tail -n1 "$asked")" "^https://api.pyo.dev/v1/releases/tags/v1.2.3" has
+check "once each, when it isn't there" "$(wc -l <"$asked")" "^2$" has
 check "and says so" "$out" "There's no release 1.2.3" has
+
+answers="api.pyo.dev/v1/releases/tags/v1.2.3"
+: >"$asked"
+out=$(release_meta 2>/dev/null)
+check "--version: api.pyo.dev's copy answers when GitHub doesn't" "$out" '"tag_name": "v9.9.9"' has
+
+# release.json and its signature: from GitHub, then api.pyo.dev's copy.
+meta='{"tag_name": "v1.2.3", "assets": []}'
+dl=github.com/upsetdev/pyo/releases/download/v1.2.3/release.json
+copy=api.pyo.dev/v1/releases/download/v1.2.3/release.json
+WORK=$(mktemp -d)
+answers="$dl $copy"
+: >"$asked"
+fetch_release_file "$meta" release.json "https://$dl" "$WORK/r" >/dev/null 2>&1
+check "release.json comes from GitHub" "$(cat "$asked")" "^https://$dl" has
+check "and only GitHub, when it answers" "$(cat "$asked")" "api\.pyo\.dev" lacks
+answers="$copy"
+: >"$asked"
+err=$(fetch_release_file "$meta" release.json "https://$dl" "$WORK/r" 2>&1 >/dev/null)
+check "then api.pyo.dev's copy, when GitHub fails" "$(tail -n1 "$asked")" "^https://$copy" has
+check "and says so" "$err" "Trying api.pyo.dev's copy" has
+answers="$copy"
+: >"$asked"
+if fetch_release_file '{"tag_name": "v1.2.3/../x"}' release.json "https://$dl" "$WORK/r" 2>/dev/null; then
+  check "a tag that leaves the path" "used" "^not$" has
+fi
+check "a tag that leaves the path isn't asked for" "$(cat "$asked")" "api\.pyo\.dev" lacks
+SOURCE=https://mirror.example/pyo
+: >"$asked"
+fetch_release_file "$meta" release.json "https://$dl" "$WORK/r" 2>/dev/null || true
+check "a mirror: no copy asked for" "$(cat "$asked")" "api\.pyo\.dev" lacks
+rm -rf "$WORK"
+defaults
 # ── The addresses at the end (addresses.sh, as host_units writes it) ──
 # The machine is stubbed: its cards (ip), its cloud's metadata and Pyo
 # (curl), Tailscale, and cert-manager's view of the HTTPS address's
