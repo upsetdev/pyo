@@ -7,6 +7,7 @@
 #   scripts/update-traffic-e2e.sh update [--dev-tag TAG] [--out DIR] [--keep]
 #   scripts/update-traffic-e2e.sh paths  [--dev-tag TAG] [--out DIR] [--keep]
 #   scripts/update-traffic-e2e.sh gateway [--dev-tag TAG] [--out DIR] [--keep]
+#   scripts/update-traffic-e2e.sh release --to VERSION [--before-update FILE] [--out DIR] [--keep]
 #
 # It makes its own throwaway multipass VMs (zd-e2e-1, zd-e2e-2), installs a
 # published Pyo release on the first (--from, default 0.51.0), and deploys
@@ -70,6 +71,20 @@
 #         HTTP/3 request, from the VM with Ubuntu's python3-aioquic) and
 #         off. One server, like paths. The tunnel leg runs only with
 #         PYO_E2E_CF_TOKEN. Its VMs are zd-gw-1 and zd-gw-2.
+# release updates the install to a published release or release
+#         candidate (--to), under traffic, with that release's own
+#         install.sh and its images from ghcr.io. A candidate's release.json
+#         keeps its -rc.N version, which install.sh refuses, so install.sh
+#         gets a copy with the version's numbers alone, as the release
+#         workflow's upgrader check does. The candidate's own release.json
+#         is checked first with install.sh's cosign, and the copy may
+#         differ from it only in that line. Then it waits for the cluster
+#         Pyo runs on to refresh itself, runs fast's steps, and moves a
+#         domain to the tunnel and back as paths does (tunnel leg only).
+#         One server, no bun or docker. Its VMs are zd-rel-1 and zd-rel-2.
+#         --before-update FILE is sourced once the test project is up,
+#         before the traffic starts (it can use api, op, state, kc, vm,
+#         say, note, TEAM, CLUSTER, URL and IP1).
 #
 # A watcher on the server logs every pod that starts, turns ready, stops
 # or goes away, so each failure is matched to the rollouts running then.
@@ -144,13 +159,14 @@ VM_IMAGES=127.0.0.1:5005/pyo
 DEV_IMAGES=${PYO_IMAGES:-127.0.0.1:5005/pyo}
 VM_PREFIX=${PYO_E2E_VM_PREFIX:-zd-e2e}
 [ "${1:-}" != gateway ] || VM_PREFIX=${PYO_E2E_VM_PREFIX:-zd-gw}
+[ "${1:-}" != release ] || VM_PREFIX=${PYO_E2E_VM_PREFIX:-zd-rel}
 VM1=$VM_PREFIX-1 VM2=$VM_PREFIX-2
 # paths: the tcp service's public TCP port.
 TCP_PORT=18080
 
 MODE=${1:-}
 [ $# -eq 0 ] || shift
-SERVERS=1 KEEP="" OUT="" GAP=30 RATE=10 FROM=0.51.0 DEV_TAG="" DEV=""
+SERVERS=1 KEEP="" OUT="" GAP=30 RATE=10 FROM=0.51.0 DEV_TAG="" DEV="" TO_RELEASE="" BEFORE_UPDATE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --servers) SERVERS=${2:?--servers takes 1 or 2}; shift 2 ;;
@@ -161,13 +177,20 @@ while [ $# -gt 0 ]; do
     --from) FROM=${2:?--from takes a version}; FROM=${FROM#v}; shift 2 ;;
     --dev-tag) DEV_TAG=${2:?--dev-tag takes a tag}; shift 2 ;;
     --dev) DEV=1; shift ;;
+    --to) TO_RELEASE=${2:?--to takes a version}; TO_RELEASE=${TO_RELEASE#v}; shift 2 ;;
+    --before-update) BEFORE_UPDATE=${2:?--before-update takes a file}; shift 2 ;;
     *) echo "Unknown option: $1 (see the top of scripts/update-traffic-e2e.sh)" >&2; exit 2 ;;
   esac
 done
 case "$MODE" in
-  fast | update | paths | gateway) ;;
-  *) echo "Usage: update-traffic-e2e.sh fast|update|paths|gateway [--servers 2] [--out DIR] [--keep]" >&2; exit 2 ;;
+  fast | update | paths | gateway | release) ;;
+  *) echo "Usage: update-traffic-e2e.sh fast|update|paths|gateway|release [--servers 2] [--out DIR] [--keep]" >&2; exit 2 ;;
 esac
+if [ "$MODE" = release ]; then
+  [[ $TO_RELEASE =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || { echo "release needs --to VERSION, like 0.52.0-rc.1." >&2; exit 2; }
+  [ "$SERVERS" = 1 ] || { echo "release runs on one server." >&2; exit 2; }
+fi
+[ -z "$BEFORE_UPDATE" ] || [ -r "$BEFORE_UPDATE" ] || { echo "Can't read $BEFORE_UPDATE." >&2; exit 2; }
 [ "$MODE" != gateway ] || DEV=1
 if [ "$MODE" = paths ]; then
   DEV=1
@@ -399,7 +422,7 @@ deploy() {
   # paths: a public TCP port too, through the gateway (TCP_PORT).
   [ "$MODE" != paths ] || compose+=$(printf '\n  tcp:\n    image: %s\n    ports: ["80"]\n' "$ECHO_IMAGE")
   # fast with the tunnel: geo, for the country rules (no traffic).
-  if [ "$MODE" = fast ] && [ -n "$TUNNEL" ]; then
+  if { [ "$MODE" = fast ] || [ "$MODE" = release ]; } && [ -n "$TUNNEL" ]; then
     GEO_HOST="geo.$dash.nip.io"
     compose+=$(printf '\n  geo:\n    image: %s\n    ports: ["80"]\n' "$ECHO_IMAGE")
   fi
@@ -440,7 +463,7 @@ deploy() {
     wait_for 120 "$WEB_HOST answers on $ip" answers "$WEB_HOST" "$ip" "" || die "$WEB_HOST doesn't answer on $ip."
   done
   note "The WAF blocks a test attack with 403, and lets a plain request through."
-  [ "$MODE" != fast ] || plain_http_domain
+  { [ "$MODE" != fast ] && [ "$MODE" != release ]; } || plain_http_domain
   if [ "$MODE" = paths ]; then
     wait_for 600 "the TCP port $TCP_PORT answers on $IP1" tcp_answers || { diagnose; die "The public TCP port didn't answer."; }
     note "The tcp service answers on TCP port $TCP_PORT."
@@ -511,8 +534,8 @@ cf_start() {
   CF_ACCOUNT=$(jq -r '.result[0].account.id' <<<"$zones")
   cf_list >"$DIR/cf-before.json" || die "Couldn't list what the zone has."
   TUN_HOST="zd-tun-$(rand).$CF_ZONE" TUNWAF_HOST="zd-tunwaf-$(rand).$CF_ZONE"
-  [ "$MODE" != paths ] || MV_HOST="zd-mv-$(rand).$CF_ZONE"
-  [ "$MODE" != fast ] || GEO_TUN_HOST="zd-geo-$(rand).$CF_ZONE"
+  { [ "$MODE" != paths ] && [ "$MODE" != release ]; } || MV_HOST="zd-mv-$(rand).$CF_ZONE"
+  { [ "$MODE" != fast ] && [ "$MODE" != release ]; } || GEO_TUN_HOST="zd-geo-$(rand).$CF_ZONE"
   say "Tunnel leg on the token's zone: $(jq -r '"\(.records | length) records, \(.tunnels | length) tunnels, \(.certificates | length) certificates"' "$DIR/cf-before.json") before the test"
 }
 # The zone's DNS records, the account's tunnels and the zone's Origin CA
@@ -715,7 +738,7 @@ cf_cleanup() {
         note "Pyo couldn't remove a tunnel domain: $(masked "$out")"
     done
     op "$(jq -n --arg c "$CLUSTER" '{op: "setClusterTraffic", clusterId: $c, mode: "public"}')" >/dev/null 2>&1 || true
-    if [ "$MODE" = paths ] && [ -n "$CLUSTER" ] && ! tunnel_gone 2>/dev/null; then
+    if { [ "$MODE" = paths ] || [ "$MODE" = release ]; } && [ -n "$CLUSTER" ] && ! tunnel_gone 2>/dev/null; then
       out=$(paths_op '{tunnel: false, restoreRecords: false, confirm: true}' 2>&1) || note "Pyo refused to turn the tunnel off: $(masked "$out")"
       wait_for 900 "Pyo removed the tunnel" tunnel_gone || note "Pyo didn't remove the tunnel."
     fi
@@ -1039,7 +1062,9 @@ probe_start() {
         echo "$(date +%s.%N) $d $(grep -i -e '^HTTP/' -e '^server:' -e '^content-length:' "$DIR/probe-h" 2>/dev/null | tr -d '\r' | tr '\n' ' ')body: $(head -c 80 "$DIR/probe-b" 2>/dev/null | tr -s '\n\t ' ' ')" >>"$DIR/probe-detail.log" ;;
       esac
       e=$(curl -s -o /dev/null -w '%{http_code}' -m 2 --resolve "$MV_HOST:443:$EDGE" "https://$MV_HOST/" || true)
-      t=$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://$IP1:$TCP_PORT/" || true)
+      # release has no tcp service.
+      t=-
+      [ "$MODE" = release ] || t=$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://$IP1:$TCP_PORT/" || true)
       echo "$(date +%s.%N) $d $e $t" >>"$DIR/probe.log"
       sleep 0.25
     done
@@ -1375,6 +1400,108 @@ update() {
   note "Envoy runs $(kc -n pyo-gateway get daemonset -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' | sed 's/@.*//')"
 }
 
+# ── release: a published release or release candidate ───────────────────────
+
+# The release's own files, checked against its release.json. Before the
+# VMs: it needs none. TO is the version install.sh is given.
+prepare_release() {
+  local f r=$DIR/release
+  say "Reading Pyo $TO_RELEASE's release"
+  mkdir -p "$r/releases/tags"
+  for f in release.json release.json.sigstore.json install.sh; do
+    curl -fsSL --proto '=https' -m 120 -o "$r/orig-$f" "$RELEASES/v$TO_RELEASE/$f" || die "Pyo $TO_RELEASE has no $f."
+  done
+  [ "$(jq -r .version "$r/orig-release.json")" = "$TO_RELEASE" ] || die "The release.json of $TO_RELEASE says it's $(jq -r .version "$r/orig-release.json")."
+  [ "$(sha256sum "$r/orig-install.sh" | cut -d' ' -f1)" = "$(jq -r '.scripts["install.sh"]' "$r/orig-release.json")" ] ||
+    die "The install.sh of $TO_RELEASE isn't the one its release.json lists."
+  TO=${TO_RELEASE%%-*}
+  # The version's numbers alone, on its one line. Nothing else changes.
+  sed "s/^  \"version\": \"$TO_RELEASE\",\$/  \"version\": \"$TO\",/" "$r/orig-release.json" >"$r/release.json"
+  [ "$(diff "$r/orig-release.json" "$r/release.json" | grep -c '^[<>]')" = 2 ] || die "Couldn't write the copy of $TO_RELEASE's release.json."
+  cp "$r/orig-install.sh" "$r/install.sh"
+  jq -n --arg v "$TO" '{tag_name: ("v" + $v), assets: [{browser_download_url: "http://127.0.0.1:8765/release.json"}]}' \
+    >"$r/releases/tags/v$TO"
+  note "$(jq -r '"minFrom \(.minFrom // "none"), manualOnly \(.manualOnly // false), \(.beforeYouUpdate // [] | length) notices, images from \(.images.pyo | sub("/pyo@.*"; ""))"' "$r/orig-release.json")"
+  [ "$TO" = "$TO_RELEASE" ] || note "install.sh gets it as Pyo $TO: it takes no release candidate."
+}
+
+push_release() {
+  vm "$VM1" mkdir -p /var/tmp/e2e
+  tar -C "$DIR" -cf "$DIR/release.tar" release
+  send "$DIR/release.tar" /var/tmp/e2e/release.tar
+  rm -f "$DIR/release.tar"
+  vm "$VM1" tar -C /var/tmp/e2e -xf /var/tmp/e2e/release.tar
+  vm "$VM1" rm -f /var/tmp/e2e/release.tar
+}
+
+run_release_update() {
+  local rc=0
+  vm "$VM1" systemd-run --quiet --unit e2e-release --collect --working-directory /var/tmp/e2e/release \
+    python3 -m http.server 8765 --bind 127.0.0.1
+  # The release's install.sh, whole. Only the signature check is its own:
+  # the candidate's release.json, with install.sh's cosign, and the copy
+  # install.sh reads must be it but for the version. Its output goes to a
+  # file on the VM, as in run_update.
+  vm "$VM1" tee /var/tmp/e2e/update.sh >/dev/null <<'SH'
+set -euo pipefail
+sleep 2
+R=/var/tmp/e2e/release
+source <(sed '$d' "$R/install.sh")
+verify_release() {
+  say "Checking the signature of the release's own release.json"
+  find_cosign
+  "$COSIGN" verify-blob --bundle "$R/orig-release.json.sigstore.json" \
+    --certificate-identity-regexp "$RELEASE_SIGNER" --certificate-oidc-issuer "$RELEASE_ISSUER" \
+    "$R/orig-release.json" >"$WORK/cosign.log" 2>&1 || { cat "$WORK/cosign.log" >&2; fail "The release's signature doesn't check out."; }
+  cmp -s <(sed '/^  "version": /d' "$R/orig-release.json") <(sed '/^  "version": /d' "$WORK/release.json") ||
+    fail "The release.json install.sh read isn't the release's."
+  say "The signature checks out"
+}
+export PYO_UPDATE_SOURCE=http://127.0.0.1:8765 PYO_TELEMETRY=off
+main --version "$1" --yes </dev/null
+SH
+  bounded multipass exec "$VM1" -- sudo sh -c 'timeout --kill-after=30s 30m bash /var/tmp/e2e/update.sh "$1" >/var/tmp/e2e/update.log 2>&1 </dev/null' sh "$TO" || rc=$?
+  vm "$VM1" cat /var/tmp/e2e/update.log | indent || true
+  vm "$VM1" systemctl stop e2e-release || true
+  [ "$rc" = 0 ] || return 1
+  note "install.sh is done. Waiting until every rollout is over."
+  settle
+}
+
+# What the server Pyo runs on says about refreshing its cluster.
+this_machine() { vm "$VM1" sh -c 'curl -fsS -m 20 "http://127.0.0.1:8000/install/this-machine?key=$(cat /etc/pyo/bootstrap-key)"'; }
+refreshed() {
+  local r
+  r=$(this_machine) || return 1
+  [[ $r == *'"state":"connected"'* ]] && [[ $r != *'"refresh":true'* ]] && ! vm "$VM1" test -e /etc/pyo/refresh-failed
+}
+self_refresh() {
+  local rc=0
+  wait_for 900 "the cluster Pyo runs on has refreshed itself" refreshed || rc=1
+  note "this-machine: $(this_machine | jq -c '{state, refresh, install}' 2>/dev/null || echo '?')"
+  note "refresh-tried: $(vm "$VM1" cat /etc/pyo/refresh-tried 2>/dev/null | tr '\n' ' ')$(vm "$VM1" test -e /etc/pyo/refresh-failed && echo ' (refresh-failed is there)')"
+  vm "$VM1" journalctl -u pyo-connect.service --since=-40min --no-pager -o cat 2>/dev/null | grep -v '^$' | tail -n 15 | indent || true
+  note "cluster: $(state | jq -c --arg c "$CLUSTER" '.clusters[] | select(.id == $c) | {status, agentVersion, version, needsRefresh, refresh}' 2>/dev/null)"
+  return $rc
+}
+
+release() {
+  action "update Pyo $FROM to $TO_RELEASE" run_release_update
+  note "Pyo runs $(kc -n pyo-system get deployment pyo -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/@.*//')"
+  note "Envoy runs $(kc -n pyo-gateway get daemonset -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' | sed 's/@.*//')"
+  note "Pyo says $(curl -fsS -m 10 "$URL/api/v1/meta" | jq -c '{version}' 2>/dev/null)"
+  action "the cluster Pyo runs on refreshes itself" self_refresh
+  fast
+  if [ -n "$MV_HOST" ]; then
+    : >"$DIR/paths.txt"
+    : >"$DIR/probes.log"
+    path_action "move $MV_HOST to the tunnel" move_mv on
+    path_action "move $MV_HOST back to public ports" move_mv off
+  else
+    skipped "move a domain to the tunnel and back" "no test zone"
+  fi
+}
+
 # ── Run ─────────────────────────────────────────────────────────────────────
 
 say "update-traffic-e2e: $MODE, $SERVERS server$([ "$SERVERS" = 1 ] || echo s), from Pyo $FROM"
@@ -1382,6 +1509,7 @@ say "update-traffic-e2e: $MODE, $SERVERS server$([ "$SERVERS" = 1 ] || echo s), 
 curl -fsSL --proto '=https' -m 60 -o "$DIR/from.json" "$RELEASES/v$FROM/release.json" || die "There's no Pyo $FROM release to install."
 [ -z "$TUNNEL" ] || cf_start
 [ -z "$DEV" ] || prepare_update
+[ "$MODE" != release ] || prepare_release
 
 launch "$VM1" 3G
 [ "$SERVERS" = 1 ] || launch "$VM2" 2G
@@ -1418,8 +1546,14 @@ if { [ "$MODE" = fast ] || [ "$MODE" = paths ] || [ "$MODE" = gateway ]; } && [ 
   note "Pyo runs $(kc -n pyo-system get deployment pyo -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/@.*//')"
 fi
 [ -z "$TUNNEL" ] || tunnel_setup
+if [ -n "$BEFORE_UPDATE" ]; then
+  say "Running $BEFORE_UPDATE"
+  # shellcheck disable=SC1090 # the caller's
+  source "$BEFORE_UPDATE"
+fi
 start_watch
 [ "$MODE" != update ] || push_build
+[ "$MODE" != release ] || push_release
 start_load
 
 case "$MODE" in
@@ -1427,6 +1561,7 @@ case "$MODE" in
   update) update ;;
   paths) paths ;;
   gateway) gateway ;;
+  release) release ;;
 esac
 
 say "Stopping the traffic"
@@ -1439,7 +1574,7 @@ multipass transfer "$VM1:/var/tmp/e2e/pods.log" - >"$DIR/pods.log"
 rc=0
 python3 "$PY" summary "$DIR" | tee "$DIR/summary.txt" || rc=$?
 [ -n "$TUNNEL" ] || echo "Tunnel domain: skipped: no test zone" | tee -a "$DIR/summary.txt"
-if [ "$MODE" = paths ]; then
+if [ "$MODE" = paths ] || { [ "$MODE" = release ] && [ -s "$DIR/paths.txt" ]; }; then
   echo "Per switch change:"
   cat "$DIR/paths.txt"
 fi
@@ -1455,7 +1590,7 @@ fi
 if [ -n "$OUT" ]; then
   mkdir -p "$OUT"
   cp "$DIR/load.log" "$DIR/pods.log" "$DIR/actions.log" "$DIR/targets" "$DIR/summary.txt" "$OUT/"
-  [ "$MODE" != paths ] || cp "$DIR/paths.txt" "$DIR/probes.log" "$OUT/"
+  [ ! -s "$DIR/paths.txt" ] || cp "$DIR/paths.txt" "$DIR/probes.log" "$OUT/"
   [ ! -e "$DIR/probe-detail.log" ] || cp "$DIR/probe-detail.log" "$OUT/"
   [ "$MODE" != gateway ] || cp "$DIR/gateway.txt" "$OUT/"
   [ ! -s "$DIR/geo.txt" ] || cp "$DIR/geo.txt" "$OUT/"
