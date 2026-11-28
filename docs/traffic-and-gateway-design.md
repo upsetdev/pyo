@@ -1011,6 +1011,27 @@ above, this list wins. Each change keeps traffic flowing.
   `tunnel_loop::promote` sets `on`: 90 seconds after the record moved, or
   a DNS-only record it replaced's TTL plus 30 seconds (300 for "auto").
   Public ports waiting for the move close after that.
+- **The tunnel's certificate no longer leaves a gap** (traffic test,
+  2026-11-28). When the tunnel's Origin CA certificate took a domain
+  over, the agent deleted the domain's cert-manager Certificate and its
+  Secret before writing the uploaded one under that name. For 2 to 4
+  seconds new HTTPS connections to the moving domain failed. Now the
+  Certificate is deleted with its Secret orphaned, and the upload is
+  written over the Secret (`gateway::retire_certificate`).
+- **Renamed routes are make-before-break** (traffic test, 2026-11-28).
+  A domain going through the tunnel, or only through it, moves to a route
+  of another name. The agent deleted the old route right after writing the
+  new one, so Envoy Gateway could see the old one gone before it took the
+  new one: the domain answered 404 for about a second. `egctl x translate`
+  shows a route for the hostname in every state in between (both routes
+  present, each write in the agent's order, each old object going), so
+  the gap is in timing, not in the objects. Now the old routes go only
+  once every new route's status says Accepted and ResolvedRefs
+  (`gateway::new_routes_taken`), at most 30 seconds, and 3 seconds
+  more: Envoy Gateway writes the status apart from sending the routes to
+  the proxies (one probe still got a 404 without it, 2026-11-28). Past that they stay
+  for the next sync, and the deploy log says so. When nothing writes route
+  status (the old routes have none), nothing waits.
 - **TCP and UDP ports pause when public ports go on or off.** They move
   between Envoy's Service and `pyo-public-ports`, and ServiceLB can't hold
   one port for both. Measured: about 1 second going off, about 5 seconds
