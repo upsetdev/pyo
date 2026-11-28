@@ -104,7 +104,7 @@ export function BootShell() {
               <div className="h-8 w-8 animate-pulse rounded-full bg-muted" />
             </div>
           </div>
-          <div className="mx-auto w-full max-w-6xl animate-pulse space-y-3 px-4 py-8 md:px-8">
+          <div className="boot-page-any mx-auto w-full max-w-6xl animate-pulse space-y-3 px-4 py-8 md:px-8">
             <div className={`h-7 w-48 ${bar}`} />
             <div className={`h-4 w-72 ${bar} opacity-60`} />
             <div className="grid gap-4 pt-5 sm:grid-cols-3">
@@ -114,7 +114,62 @@ export function BootShell() {
             </div>
             <div className="h-64 rounded-[14px] border border-card-border bg-card" />
           </div>
+          <ClusterSettingsBoot />
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** A card's outline as Layered draws it: the frame, its title, the card. */
+function BootCard({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="rounded-[20px] border border-frame-border bg-muted p-1.5">
+      <div className="flex min-h-9 items-center px-3 pb-1.5 pt-1">
+        <div className={`h-3.5 ${title} rounded-md bg-muted-foreground/15`} />
+      </div>
+      <div className={`${body} rounded-[14px] border border-card-border bg-card`} />
+    </div>
+  );
+}
+
+/**
+ * A cluster's Settings tab (clusters/$clusterId/settings.tsx), in its page's
+ * place and columns: the header and tabs, then Metadata, Traffic, Traffic
+ * routing, Gateway, mTLS and Danger zone beside Connection. Heights are
+ * close to a typical cluster's.
+ */
+function ClusterSettingsBoot() {
+  const bar = "rounded-md bg-muted/70";
+  return (
+    <div className="boot-page-cluster-settings mx-auto w-full max-w-6xl animate-pulse space-y-8 px-4 py-8 md:px-8 md:py-10">
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+          <div className="space-y-3 pt-1">
+            <div className={`h-7 w-56 ${bar}`} />
+            <div className={`h-4 w-80 max-w-full ${bar} opacity-60`} />
+          </div>
+          <div className="flex gap-2">
+            <div className="h-8 w-28 rounded-lg border border-border bg-card" />
+            <div className="h-8 w-44 rounded-lg border border-border bg-card" />
+          </div>
+        </div>
+        <div className="flex h-9 items-center gap-6 border-b border-border">
+          {["w-16", "w-14", "w-20", "w-20", "w-14", "w-14"].map((w, i) => (
+            <div key={i} className={`h-3.5 ${w} ${bar}`} />
+          ))}
+        </div>
+      </div>
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+        <div className="space-y-4">
+          <BootCard title="w-20" body="h-[160px]" />
+          <BootCard title="w-14" body="h-[204px]" />
+          <BootCard title="w-28" body="h-[244px]" />
+          <BootCard title="w-16" body="h-[340px]" />
+          <BootCard title="w-12" body="h-[104px]" />
+          <BootCard title="w-24" body="h-[124px]" />
+        </div>
+        <BootCard title="w-20" body="h-[500px]" />
       </div>
     </div>
   );

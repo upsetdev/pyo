@@ -2690,7 +2690,7 @@ pub const HEADERS_KEPT: &str = "This cluster's install is older than Pyo's. Run 
 /// Whether the agent last wrote a client policy without its `headers`
 /// because the install refused them. Sent with each heartbeat
 /// (`AgentScope::headers_kept`).
-static KEPT: AtomicBool = AtomicBool::new(false);
+static KEPT: crate::flag::Flag = crate::flag::Flag::new();
 
 pub fn headers_kept() -> bool {
     KEPT.load(Ordering::Relaxed)

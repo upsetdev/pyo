@@ -18,6 +18,11 @@ html[data-boot="auth"] #boot .boot-app,
 html:not([data-boot="auth"]) #boot .boot-auth {
   display: none;
 }
+/* The content's outline: a page's own (data-boot-page), else the generic one. */
+html:not([data-boot-page="cluster-settings"]) #boot .boot-page-cluster-settings,
+html[data-boot-page] #boot .boot-page-any {
+  display: none;
+}
 
 @layer base {
   :root,

@@ -272,7 +272,8 @@ Servers stay on the tailnet when this is off.     tail1234.ts.net
   the wanted one, until the cluster reports it.
 - Disabled switches say why on the hint line: "Connect Cloudflare
   first.", "Give the token Cloudflare Tunnel:Edit.", "Not reported yet.",
-  "Connect Tailscale on Integrations first."
+  "Connect Tailscale first." (next to a link to Integrations). Tailscale
+  shows off until the team connects Tailscale, whatever the saved value.
 - Viewers and developers: switches disabled, no buttons, no hint about
   roles beyond the panel's usual note.
 - No flash or jump: the card renders from the cluster snapshot and the
@@ -373,7 +374,7 @@ Errors, plain:
 
 - "Turn on another path first. A cluster needs one."
 - "Connect Cloudflare first." / "Give the token Cloudflare Tunnel:Edit."
-- "Connect Tailscale on Integrations first." (Tailnet on with no
+- "Connect Tailscale first." (Tailnet on with no
   Tailscale is allowed: this is only for the hint. The op accepts it.)
 - "Run the command under Refresh this cluster in the cluster's settings
   first."
