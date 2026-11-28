@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use pyo_proto::{Command, Release, UpgradeSpec, parse_version};
+use pyo_proto::{Command, Release, UpgradeSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -68,8 +68,10 @@ pub fn current() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Whether version `a` is later than `b`. A release candidate compares as
+/// its release does, and comes just before it (`pyo_proto::version_order`).
 fn newer(a: &str, b: &str) -> bool {
-    matches!((parse_version(a), parse_version(b)), (Some(a), Some(b)) if a > b)
+    pyo_proto::version_newer(a, b)
 }
 
 /// Said before an update whose agent has other roles than this Pyo's, on
@@ -1816,6 +1818,17 @@ mod tests {
         assert!(!newer("0.2.0", "0.2.0"));
         assert!(!newer("0.2.0", ""));
         assert!(!newer("garbage", "0.1.0"));
+        // A release candidate compares with other releases as its release
+        // does: a candidate Pyo offers, and sends agents, what its release
+        // would.
+        for other in ["0.51.0", "0.51.9", "0.52.1", "1.0.0", "0.0.1", "", "dev"] {
+            assert_eq!(newer("0.52.0-rc.1", other), newer("0.52.0", other), "{other}");
+            assert_eq!(newer(other, "0.52.0-rc.1"), newer(other, "0.52.0"), "{other}");
+        }
+        // The release comes after its candidates, so it's offered to them.
+        assert!(newer("0.52.0", "0.52.0-rc.1"));
+        assert!(newer("0.52.0-rc.2", "0.52.0-rc.1"));
+        assert!(!newer("0.52.0-rc.1", "0.52.0-rc.1"));
     }
 
     fn cluster(same: bool, updates: i32, online: bool) -> ClusterRow {
@@ -1936,9 +1949,9 @@ mod hosted_tests {
     fn only_older_agents_are_behind() {
         let v = current();
         assert!(!agent_behind(v));
-        // A release candidate isn't a version updates compare, so it moves
-        // no agent.
-        assert_eq!(agent_behind("0.0.1"), parse_version(v).is_some());
+        // Every version this Pyo can be built as, a release candidate
+        // included, moves older agents.
+        assert!(agent_behind("0.0.1"));
         assert!(!agent_behind("99.0.0"));
         // A build with no version is left alone.
         assert!(!agent_behind(""));

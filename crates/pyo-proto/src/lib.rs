@@ -1670,6 +1670,34 @@ pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(out)
 }
 
+/// A version's place in release order, for comparing versions: a release
+/// ("1.2.3" or "v1.2.3") or a release candidate ("1.2.3-rc.4"). A
+/// candidate sorts by its numbers, like its release, and only below that
+/// release itself (and below its later candidates). So a candidate Pyo
+/// compares with other releases exactly as its release does. Anything
+/// else doesn't parse. Where only a release will do (release.json's
+/// version, minFrom), use [`parse_version`].
+pub fn version_order(v: &str) -> Option<(u64, u64, u64, u64)> {
+    let (release, rc) = match v.split_once('-') {
+        None => (v, u64::MAX),
+        Some((release, pre)) => {
+            let n = pre.strip_prefix("rc.")?;
+            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            (release, n.parse().ok().filter(|r| *r < u64::MAX)?)
+        }
+    };
+    let (x, y, z) = parse_version(release)?;
+    Some((x, y, z, rc))
+}
+
+/// Whether version `a` comes after version `b` in [`version_order`]. False
+/// when either doesn't parse.
+pub fn version_newer(a: &str, b: &str) -> bool {
+    matches!((version_order(a), version_order(b)), (Some(a), Some(b)) if a > b)
+}
+
 impl Release {
     /// The images its databases run, by [`bundles::database_images`]' keys:
     /// Pyo's Postgres and pyo-kv from `images`, the rest from
@@ -1756,11 +1784,12 @@ impl Release {
         out
     }
 
-    /// Whether `current` may update straight to this release.
+    /// Whether `current` may update straight to this release. A release
+    /// candidate counts by its numbers: X.Y.Z-rc.N is as far along as X.Y.Z.
     pub fn allows_from(&self, current: &str) -> bool {
         match (
             self.min_from.as_deref().and_then(parse_version),
-            parse_version(current),
+            version_order(current).map(|(x, y, z, _)| (x, y, z)),
         ) {
             (None, _) => true,
             (Some(min), Some(cur)) => cur >= min,
@@ -3388,6 +3417,33 @@ mod release_tests {
         assert!(parse_version("0.10.0") > parse_version("0.9.9"));
     }
 
+    /// A release candidate sorts by its numbers, like its release, and
+    /// only below that release. Nothing else that isn't a release parses.
+    #[test]
+    fn release_candidates_sort_like_their_release() {
+        assert_eq!(version_order("0.52.0"), Some((0, 52, 0, u64::MAX)));
+        assert_eq!(version_order("v0.52.0-rc.1"), Some((0, 52, 0, 1)));
+        for v in ["0.52.0-rc", "0.52.0-rc.", "0.52.0-rc.1x", "0.52.0-beta.1", "0.52.0-", "0.52-rc.1", "", "dev"] {
+            assert_eq!(version_order(v), None, "{v}");
+        }
+        // Against other releases, a candidate is its release.
+        for (a, b) in [("0.52.0-rc.1", "0.51.0"), ("0.52.0-rc.1", "0.51.9"), ("0.10.0-rc.1", "0.9.9")] {
+            assert!(version_newer(a, b), "{a} after {b}");
+            assert!(!version_newer(b, a), "{b} not after {a}");
+            let release = a.split('-').next().unwrap();
+            assert!(version_newer(release, b) && !version_newer(b, release));
+        }
+        assert!(!version_newer("0.52.0-rc.1", "0.52.1"));
+        assert!(version_newer("0.52.1", "0.52.0-rc.1"));
+        // Its own release comes after it, and later candidates do too.
+        assert!(version_newer("0.52.0", "0.52.0-rc.1"));
+        assert!(!version_newer("0.52.0-rc.1", "0.52.0"));
+        assert!(version_newer("0.52.0-rc.10", "0.52.0-rc.2"));
+        assert!(!version_newer("0.52.0-rc.1", "0.52.0-rc.1"));
+        assert!(!version_newer("0.52.0-rc.1", ""));
+        assert!(!version_newer("dev", "0.52.0-rc.1"));
+    }
+
     #[test]
     fn digests() {
         assert!(pinned_image(&format!(
@@ -3853,6 +3909,23 @@ mod release_tests {
         assert!(r.allows_from("0.1.9"));
         assert!(!r.allows_from("0.1.4"));
         assert!(!r.allows_from("dev"));
+        // A candidate counts by its numbers.
+        assert!(r.allows_from("0.1.5-rc.1"));
+        assert!(r.allows_from("0.1.9-rc.3"));
+        assert!(!r.allows_from("0.1.4-rc.1"));
+        assert!(!r.allows_from("0.1.5-beta.1"));
+    }
+
+    /// release.json names a release: a candidate's version is refused
+    /// there (the release workflow checks a candidate's copy without it).
+    #[test]
+    fn a_release_names_a_release_version() {
+        let mut r = release();
+        r.version = "0.52.0-rc.1".into();
+        assert!(r.problems().iter().any(|p| p.contains("isn't a release version")), "{:?}", r.problems());
+        r.version = "0.52.0".into();
+        r.min_from = Some("0.51.0-rc.1".into());
+        assert!(r.problems().iter().any(|p| p.contains("minFrom")), "{:?}", r.problems());
     }
 
     #[test]

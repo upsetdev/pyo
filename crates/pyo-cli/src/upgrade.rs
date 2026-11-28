@@ -53,9 +53,11 @@ fn parse(v: &str) -> Option<(u64, u64, u64)> {
     n.next().is_none().then_some(out)
 }
 
-/// Whether `a` is a later version than `b`.
+/// Whether `a` is a later version than `b`. A release candidate compares
+/// as its release does, and comes just before it, so a candidate's CLI
+/// upgrades to its release.
 fn newer(a: &str, b: &str) -> bool {
-    matches!((parse(a), parse(b)), (Some(a), Some(b)) if a > b)
+    pyo_proto::version_newer(a.trim(), b.trim())
 }
 
 fn http(timeout: Duration, redirects: bool) -> Result<reqwest::Client> {
@@ -388,6 +390,11 @@ mod tests {
         assert!(newer("0.10.0", "0.9.9"));
         assert!(!newer("0.2.5", "0.2.5"));
         assert!(!newer("", "0.2.5"));
+        assert!(newer("v0.52.0", "0.52.0-rc.1"));
+        assert!(newer("0.52.0-rc.2", "0.52.0-rc.1"));
+        assert!(!newer("0.52.0-rc.1", "0.52.0"));
+        assert!(newer("0.52.0-rc.1", "0.51.0"));
+        assert!(!newer("0.51.0", "0.52.0-rc.1"));
         assert!(pyo_is_behind("0.2.5", "0.3.0"));
         assert!(!pyo_is_behind("0.2.5", "0.2.9"));
         assert!(!pyo_is_behind("0.3.0", "0.2.5"));
