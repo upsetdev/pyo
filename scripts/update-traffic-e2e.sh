@@ -875,7 +875,12 @@ probe_start() {
   (
     for fd in 3 4 5 6 7 8 9; do eval "exec $fd>&-"; done
     while [ ! -e "$DIR/probe-stop" ]; do
-      d=$(curl -ks -o /dev/null -w '%{http_code}' -m 2 --resolve "$MV_HOST:443:$IP1" "https://$MV_HOST/" || true)
+      d=$(curl -ks -D "$DIR/probe-h" -o "$DIR/probe-b" -w '%{http_code}' -m 2 --resolve "$MV_HOST:443:$IP1" "https://$MV_HOST/" || true)
+      # Who answered when it wasn't the service: Envoy's own 404 has no
+      # body and server: envoy.
+      case "$d" in 200 | 403) ;; *)
+        echo "$(date +%s.%N) $d $(grep -i -e '^HTTP/' -e '^server:' -e '^content-length:' "$DIR/probe-h" 2>/dev/null | tr -d '\r' | tr '\n' ' ')body: $(head -c 80 "$DIR/probe-b" 2>/dev/null | tr -s '\n\t ' ' ')" >>"$DIR/probe-detail.log" ;;
+      esac
       e=$(curl -s -o /dev/null -w '%{http_code}' -m 2 --resolve "$MV_HOST:443:$EDGE" "https://$MV_HOST/" || true)
       t=$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://$IP1:$TCP_PORT/" || true)
       echo "$(date +%s.%N) $d $e $t" >>"$DIR/probe.log"
@@ -1284,6 +1289,7 @@ if [ -n "$OUT" ]; then
   mkdir -p "$OUT"
   cp "$DIR/load.log" "$DIR/pods.log" "$DIR/actions.log" "$DIR/targets" "$DIR/summary.txt" "$OUT/"
   [ "$MODE" != paths ] || cp "$DIR/paths.txt" "$DIR/probes.log" "$OUT/"
+  [ ! -e "$DIR/probe-detail.log" ] || cp "$DIR/probe-detail.log" "$OUT/"
   [ "$MODE" != gateway ] || cp "$DIR/gateway.txt" "$OUT/"
   echo "Logs: $OUT"
 fi
