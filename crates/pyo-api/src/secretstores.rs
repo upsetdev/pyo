@@ -316,7 +316,7 @@ impl SigV4<'_> {
     }
 }
 
-fn aws_time(at: cookie::time::OffsetDateTime) -> String {
+fn aws_time(at: time::OffsetDateTime) -> String {
     format!(
         "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
         at.year(),
@@ -344,7 +344,7 @@ async fn aws_post(
         Some(p) => format!("{}:{p}", url.host_str().unwrap_or("")),
         None => url.host_str().unwrap_or("").to_owned(),
     };
-    let time = aws_time(cookie::time::OffsetDateTime::now_utc());
+    let time = aws_time(time::OffsetDateTime::now_utc());
     let content_type = if target.is_some() {
         "application/x-amz-json-1.1"
     } else {

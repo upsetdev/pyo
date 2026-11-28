@@ -316,7 +316,7 @@ pub fn generate_origin_pull(
     years: i64,
     now_secs: i64,
 ) -> anyhow::Result<OriginPull> {
-    use cookie::time::{Duration, OffsetDateTime};
+    use ::time::{Duration, OffsetDateTime};
     use rcgen::{
         BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
         IsCa, Issuer, KeyPair, KeyUsagePurpose,

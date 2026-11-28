@@ -23,11 +23,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{Router, extract::State, http::HeaderMap, routing::post};
-use axum_extra::extract::CookieJar;
+use crate::cookies::CookieJar;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
-use totp_rs::{Algorithm, Builder, Secret, Totp};
+use hmac::{Hmac, KeyInit, Mac};
+use sha1::Sha1;
+use subtle::ConstantTimeEq;
 
 use crate::{
     AppState,
@@ -57,15 +59,53 @@ pub fn routes() -> Router<AppState> {
 
 // ── Codes ──────────────────────────────────────────────────────────────────
 
-fn totp(secret: &[u8]) -> ApiResult<Totp> {
-    Builder::new()
-        .with_algorithm(Algorithm::SHA1)
-        .with_digits(6)
-        .with_skew(1)
-        .with_step_duration(STEP)
-        .with_secret(Secret::from(secret.to_vec()))
-        .build()
-        .map_err(|e| anyhow::anyhow!("authenticator secret: {e:?}").into())
+/// The app's code for a time step: HMAC-SHA1 of the step, cut to 6 digits
+/// (RFC 4226's dynamic truncation, as RFC 6238 uses it).
+pub(crate) fn code_for_step(secret: &[u8], step: u64) -> Option<String> {
+    let mut mac = Hmac::<Sha1>::new_from_slice(secret).ok()?;
+    mac.update(&step.to_be_bytes());
+    let h = mac.finalize().into_bytes();
+    let i = (h[h.len() - 1] & 0x0f) as usize;
+    let n = u32::from_be_bytes([h[i] & 0x7f, h[i + 1], h[i + 2], h[i + 3]]);
+    Some(format!("{:06}", n % 1_000_000))
+}
+
+/// RFC 4648's base32 alphabet, the form authenticator apps take a secret in.
+const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/// Base32 without padding.
+fn base32_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let (mut buf, mut bits) = (0u32, 0u32);
+    for &b in bytes {
+        buf = (buf << 8) | u32::from(b);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(BASE32[((buf >> bits) & 31) as usize] as char);
+        }
+        buf &= (1 << bits) - 1;
+    }
+    if bits > 0 {
+        out.push(BASE32[((buf << (5 - bits)) & 31) as usize] as char);
+    }
+    out
+}
+
+/// Base32 in either case, padding optional. None if a letter isn't base32.
+pub(crate) fn base32_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 5 / 8);
+    let (mut buf, mut bits) = (0u32, 0u32);
+    for c in s.trim_end_matches('=').bytes() {
+        let v = BASE32.iter().position(|a| *a == c.to_ascii_uppercase())? as u32;
+        buf = ((buf << 5) | v) & 0x1fff;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 fn now() -> u64 {
@@ -82,10 +122,17 @@ fn check_code(secret: &[u8], code: &str, time: u64, last_step: u64) -> Option<u6
     if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    totp(secret)
-        .ok()?
-        .check(&code, time)
-        .filter(|step| *step > last_step)
+    // The step before and after count too: phone clocks drift. All three
+    // are compared, so the time taken doesn't tell which one matched.
+    let now = time / STEP;
+    let mut hit = None;
+    for step in [now.checked_sub(1), Some(now), now.checked_add(1)].into_iter().flatten() {
+        let want = code_for_step(secret, step)?;
+        if bool::from(want.as_bytes().ct_eq(code.as_bytes())) {
+            hit = Some(step);
+        }
+    }
+    hit.filter(|step| *step > last_step)
 }
 
 /// Letters and digits that can't be mistaken for each other.
@@ -207,9 +254,7 @@ fn open_secret(sealer: &crate::secrets::Sealer, sealed: &str) -> ApiResult<Vec<u
     let b32 = sealer
         .open(sealed)
         .map_err(|e| anyhow::anyhow!("authenticator secret: {e}"))?;
-    Secret::try_from_base32(&b32)
-        .map(|s| s.as_bytes().to_vec())
-        .map_err(|e| anyhow::anyhow!("authenticator secret: {e:?}").into())
+    base32_decode(&b32).ok_or_else(|| anyhow::anyhow!("authenticator secret: not base32").into())
 }
 
 // ── State ──────────────────────────────────────────────────────────────────
@@ -456,7 +501,7 @@ async fn setup(
     }
     let mut raw = [0u8; 20];
     rand::fill(&mut raw);
-    let secret = Secret::from(raw.to_vec()).to_base32();
+    let secret = base32_encode(&raw);
     let sealed = state.sealer.seal(&secret)?;
     sqlx::query(
         "INSERT INTO pyo.user_totp (user_id, secret_sealed) VALUES ($1, $2)
@@ -732,19 +777,48 @@ mod tests {
     /// working once.
     #[test]
     fn codes_follow_the_rfc_and_work_once() {
-        let t = totp(SECRET).unwrap();
-        assert_eq!(t.generate(59).to_string(), "287082");
-        assert_eq!(t.generate(1_111_111_109).to_string(), "081804");
-        assert_eq!(t.generate(1_234_567_890).to_string(), "005924");
+        let code = |time: u64| code_for_step(SECRET, time / STEP).unwrap();
+        assert_eq!(code(59), "287082");
+        assert_eq!(code(1_111_111_109), "081804");
+        assert_eq!(code(1_111_111_111), "050471");
+        assert_eq!(code(1_234_567_890), "005924");
+        assert_eq!(code(2_000_000_000), "279037");
+        assert_eq!(code(20_000_000_000), "353130");
         let step = check_code(SECRET, "287 082", 59, 0).expect("good at its time");
         assert_eq!(step, 1);
         // The step before and after still count (clocks drift).
-        assert!(check_code(SECRET, "287082", 59 + 30, 0).is_some());
+        assert_eq!(check_code(SECRET, "287082", 59 + 30, 0), Some(1));
+        assert_eq!(check_code(SECRET, "287082", 59 - 30, 0), Some(1));
         assert!(check_code(SECRET, "287082", 59 + 90, 0).is_none());
+        // At step 0 there's no step before, and that's fine.
+        let next = code_for_step(SECRET, 1).unwrap();
+        assert_eq!(check_code(SECRET, &next, 0, 0), Some(1));
         // Used once: not again.
         assert!(check_code(SECRET, "287082", 59, step).is_none());
         assert!(check_code(SECRET, "28708", 59, 0).is_none());
         assert!(check_code(SECRET, "abcdef", 59, 0).is_none());
+    }
+
+    /// RFC 4648's base32 test vectors, both ways.
+    #[test]
+    fn secrets_read_and_write_as_base32() {
+        for (raw, b32) in [
+            ("", ""),
+            ("f", "MY"),
+            ("fo", "MZXQ"),
+            ("foo", "MZXW6"),
+            ("foob", "MZXW6YQ"),
+            ("fooba", "MZXW6YTB"),
+            ("foobar", "MZXW6YTBOI"),
+        ] {
+            assert_eq!(base32_encode(raw.as_bytes()), b32);
+            assert_eq!(base32_decode(b32).unwrap(), raw.as_bytes());
+        }
+        assert_eq!(base32_encode(SECRET), "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+        assert_eq!(base32_decode("mzxw6ytboi======").unwrap(), b"foobar");
+        assert!(base32_decode("MZXW1").is_none());
+        let raw: Vec<u8> = (0..=255).collect();
+        assert_eq!(base32_decode(&base32_encode(&raw)).unwrap(), raw);
     }
 
     #[test]
@@ -795,7 +869,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        let b32 = Secret::from(SECRET.to_vec()).to_base32();
+        let b32 = base32_encode(SECRET);
         sqlx::query("INSERT INTO pyo.user_totp (user_id, secret_sealed) VALUES ($1, $2)")
             .bind(&user)
             .bind(sealer.seal(&b32).unwrap())

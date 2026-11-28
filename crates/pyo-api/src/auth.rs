@@ -15,15 +15,12 @@ use axum::{
     http::{HeaderMap, StatusCode, request::Parts},
     routing::{get, post},
 };
-use axum_extra::extract::{
-    CookieJar,
-    cookie::{Cookie, SameSite},
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
     AppState,
+    cookies::{Cookie, CookieJar},
     error::{ApiError, ApiResult},
     ids::{new_id, secret_token, sha256_hex},
     ratelimit::{self, ClientIp},
@@ -163,7 +160,7 @@ impl FromRequestParts<AppState> for AnySession {
         let jar = CookieJar::from_headers(&parts.headers);
         let token = jar
             .get(SESSION_COOKIE)
-            .map(|c| c.value().to_owned())
+            .map(str::to_owned)
             .ok_or_else(ApiError::unauthorized)?;
         let from = crate::admin_sign_in::Source::from_parts(parts);
         let user = session_user(&state.db, &token, &from)
@@ -376,20 +373,6 @@ pub(crate) fn require_csrf(headers: &HeaderMap) -> ApiResult<()> {
     }
 }
 
-fn session_cookie(state: &AppState, token: String) -> Cookie<'static> {
-    Cookie::build((SESSION_COOKIE, token))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .secure(state.config.cookie_secure)
-        .max_age(time_days(SESSION_DAYS))
-        .build()
-}
-
-fn time_days(days: i64) -> cookie::time::Duration {
-    cookie::time::Duration::days(days)
-}
-
 pub(crate) async fn start_session(
     state: &AppState,
     jar: CookieJar,
@@ -404,7 +387,12 @@ pub(crate) async fn start_session(
         .take(300)
         .collect::<String>();
     let token = new_session(&state.db, user_id, &agent).await?;
-    Ok(jar.add(session_cookie(state, token)))
+    Ok(jar.add(Cookie {
+        name: SESSION_COOKIE,
+        value: &token,
+        max_age: SESSION_DAYS * 24 * 60 * 60,
+        secure: state.config.cookie_secure,
+    })?)
 }
 
 /// A new session's token.
@@ -934,14 +922,14 @@ async fn logout(
     jar: CookieJar,
 ) -> ApiResult<(CookieJar, StatusCode)> {
     require_csrf(&headers)?;
-    if let Some(c) = jar.get(SESSION_COOKIE) {
+    if let Some(token) = jar.get(SESSION_COOKIE) {
         sqlx::query("DELETE FROM pyo.sessions WHERE token_hash = $1")
-            .bind(sha256_hex(c.value()))
+            .bind(sha256_hex(token))
             .execute(&state.db)
             .await?;
     }
     Ok((
-        jar.remove(Cookie::build(SESSION_COOKIE).path("/").build()),
+        jar.remove(SESSION_COOKIE, state.config.cookie_secure)?,
         StatusCode::NO_CONTENT,
     ))
 }
