@@ -1059,8 +1059,8 @@ pub async fn apply(
     // taken before these go (`new_routes_taken`).
     let routes_before = route_names(client, &spec.service.service_id).await;
     // Behind a CDN, or through the tunnel: its HTTPS client policy as the
-    // cluster's websites have theirs otherwise. The tunnel's trusts its
-    // connectors' pods as they are now.
+    // cluster's websites have theirs otherwise. The tunnel's gets its
+    // connectors' pods as they are when it's written (`write_tunnel_policy`).
     let mut w = None;
     for o in r.objects.iter_mut().filter(|o| {
         o["kind"] == "ClientTrafficPolicy" && o["metadata"]["labels"][system::CDN_LABEL].is_string()
@@ -1069,10 +1069,6 @@ pub async fn apply(
             Some(w) => w,
             None => *w.insert(web_settings(client).await?),
         };
-        if o["metadata"]["labels"][system::CDN_LABEL] == system::TUNNEL_CDN {
-            let pods = crate::tunnel::trusted_now();
-            set_trusted(o, |have| with_pods(have, &[], &pods));
-        }
         rewrite_cdn_policy(o, w);
     }
     // New public TCP and UDP ports wait for the servers to free them (a port
@@ -1155,13 +1151,15 @@ pub async fn apply(
         let kind = o["kind"].as_str().unwrap_or("").to_owned();
         let name = o["metadata"]["name"].as_str().unwrap_or("").to_owned();
         let api = api_of(client, &kind);
-        let written = if kind == "ClientTrafficPolicy" {
+        let tunnel_policy = kind == "ClientTrafficPolicy"
+            && o["metadata"]["labels"][system::CDN_LABEL] == system::TUNNEL_CDN;
+        let written = if tunnel_policy {
+            write_tunnel_policy(client, &name, o.clone()).await
+        } else if kind == "ClientTrafficPolicy" {
             write_client_policy(&api, &name, o).await
         } else {
             api.patch(&name, &pp(), &Patch::Apply(o)).await.map(|_| ())
         };
-        let tunnel_policy = kind == "ClientTrafficPolicy"
-            && o["metadata"]["labels"][system::CDN_LABEL] == system::TUNNEL_CDN;
         let older = older_form(o);
         match written {
             Ok(()) => {}
@@ -2658,6 +2656,12 @@ async fn write_web(client: &Client, w: system::WebSettings) -> anyhow::Result<()
         .await?;
     for p in cdn.items {
         let name = p.name_any();
+        // The tunnel's: read again and written while the tunnel's watch
+        // waits, so a connector it added since the list stays.
+        if p.labels().get(system::CDN_LABEL).map(String::as_str) == Some(system::TUNNEL_CDN) {
+            rewrite_tunnel_settings(client, &name, w).await?;
+            continue;
+        }
         let mut o = json!({
             "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy",
             "metadata": { "name": name, "namespace": GATEWAY_NS, "labels": p.labels() },
@@ -2788,11 +2792,109 @@ pub async fn tunnel_policies(client: &Client) -> kube::Result<Vec<DynamicObject>
         .items)
 }
 
+/// A service's tunnel policy, written as `o` has it (its CDN's ranges
+/// while a domain switches) plus every connector's address right then
+/// (tunnel.rs `connectors_now`), while the tunnel's watch waits. Never
+/// with the addresses as they were a moment before: a connector the
+/// watch just added may already be serving.
+async fn write_tunnel_policy(client: &Client, name: &str, mut o: Value) -> kube::Result<()> {
+    let written = {
+        let _watch_waits = crate::tunnel::writing().await;
+        let pods = crate::tunnel::connectors_now(client).await?;
+        set_trusted(&mut o, |have| with_pods(have, &[], &pods));
+        write_client_policy(&api_of(client, "ClientTrafficPolicy"), name, &o).await
+    };
+    crate::tunnel::look_again();
+    written
+}
+
+/// A tunnel policy with these websites' settings: read and written while
+/// the tunnel's watch waits, its trusted addresses kept, every
+/// connector's added. Gone already: nothing to do.
+async fn rewrite_tunnel_settings(client: &Client, name: &str, w: system::WebSettings) -> kube::Result<()> {
+    let policies = api_of(client, "ClientTrafficPolicy");
+    let written = {
+        let _watch_waits = crate::tunnel::writing().await;
+        let Some(p) = policies.get_opt(name).await? else {
+            return Ok(());
+        };
+        let pods = crate::tunnel::connectors_now(client).await?;
+        let mut o = json!({
+            "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy",
+            "metadata": { "name": name, "namespace": GATEWAY_NS, "labels": p.labels() },
+            "spec": p.data["spec"].clone(),
+        });
+        rewrite_cdn_policy(&mut o, w);
+        set_trusted(&mut o, |have| with_pods(have, &[], &pods));
+        write_client_policy(&policies, name, &o).await
+    };
+    crate::tunnel::look_again();
+    written
+}
+
+/// Every listener a tunnel route is on, as (Gateway, section): each must
+/// have a tunnel policy, or it trusts no connector.
+pub async fn tunnel_listeners(client: &Client) -> kube::Result<Vec<(String, String)>> {
+    let routes = api_of(client, "HTTPRoute").list(&ListParams::default()).await?.items;
+    Ok(tunnel_listeners_of(&routes))
+}
+
+/// The listeners of these routes that are tunnel routes (their rules set
+/// X-Forwarded-For to the visitor, `system::tunnel_rule`). A route on a
+/// whole Gateway is on its hostnames' listeners (`h-<hash>`).
+pub fn tunnel_listeners_of(routes: &[DynamicObject]) -> Vec<(String, String)> {
+    let header = system::forwarded_for_visitor();
+    let mut out = vec![];
+    for r in routes {
+        let tunneled = r.data["spec"]["rules"].as_array().into_iter().flatten().any(|rule| {
+            rule["filters"].as_array().into_iter().flatten().any(|f| {
+                f["type"] == "RequestHeaderModifier"
+                    && f["requestHeaderModifier"]["set"]
+                        .as_array()
+                        .is_some_and(|set| set.contains(&header))
+            })
+        });
+        if !tunneled {
+            continue;
+        }
+        let hosts: Vec<&str> = r.data["spec"]["hostnames"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        for parent in r.data["spec"]["parentRefs"].as_array().into_iter().flatten() {
+            let Some(gw) = parent["name"].as_str() else {
+                continue;
+            };
+            match parent["sectionName"].as_str() {
+                Some(s) => out.push((gw.to_owned(), s.to_owned())),
+                None => out.extend(hosts.iter().map(|h| (gw.to_owned(), format!("h-{}", host_hash(h))))),
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether a client policy is for this listener.
+pub fn policy_covers(p: &DynamicObject, gateway: &str, section: &str) -> bool {
+    p.data["spec"]["targetRefs"].as_array().into_iter().flatten().any(|t| {
+        t["kind"] == "Gateway" && t["name"] == gateway && t["sectionName"] == section
+    })
+}
+
 /// The connectors' pods moved (`old` → `pods`): every tunnel policy
-/// trusts the new ones. Refused by an older install: said, and kept.
+/// trusts the new ones. Each is written in this release's form (its
+/// listeners and trusted ranges kept, the websites' settings as they
+/// are): one an older agent wrote is refused as it is by this release's
+/// admission policy, and the update from 0.51.0 left a new connector
+/// untrusted that way. Refused by an older install: said, and kept.
 pub async fn set_tunnel_pods(client: &Client, old: &[String], pods: &[String]) -> anyhow::Result<()> {
     let policies = api_of(client, "ClientTrafficPolicy");
     let found = tunnel_policies(client).await?;
+    let w = web_settings(client).await?;
     for p in found {
         let name = p.name_any();
         let mut o = json!({
@@ -2800,6 +2902,7 @@ pub async fn set_tunnel_pods(client: &Client, old: &[String], pods: &[String]) -
             "metadata": { "name": name, "namespace": GATEWAY_NS, "labels": p.labels() },
             "spec": p.data["spec"].clone(),
         });
+        rewrite_cdn_policy(&mut o, w);
         set_trusted(&mut o, |have| with_pods(have, old, pods));
         if let Err(e) = write_client_policy(&policies, &name, &o).await {
             if crate::refused::is_refusal(&e) {
@@ -4161,6 +4264,143 @@ mod tests {
         let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
         let notes = apply(&client, &pyo, &b).await.expect("the routes");
         assert!(notes.contains(&crate::tunnel::REFUSED.to_owned()), "{notes:?}");
+    }
+
+    const TUNNEL_POLICY: &str =
+        "apis/gateway.envoyproxy.io/v1alpha1/namespaces/pyo-gateway/clienttrafficpolicies/shop-web-tunnel";
+
+    fn connector_pod(kube: &crate::fakekube::FakeKube, name: &str, ip: &str) {
+        kube.put(
+            &format!("api/v1/namespaces/pyo-system/pods/{name}"),
+            json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": { "labels": { "app.kubernetes.io/name": system::TUNNEL_APP } },
+                "spec": { "containers": [] },
+                "status": { "phase": "Running", "podIP": ip, "podIPs": [{ "ip": ip }] },
+            }),
+        );
+    }
+
+    fn trusted_by(kube: &crate::fakekube::FakeKube, path: &str) -> Value {
+        kube.get(path).expect("the tunnel policy")["spec"]["clientIPDetection"]["xForwardedFor"]["trustedCIDRs"].clone()
+    }
+
+    /// A deploy writes its tunnel policy with every connector there is at
+    /// that moment: those the watch wrote, a pod the watch hasn't seen yet,
+    /// and one that came while the deploy ran. It used to write the list
+    /// as it was when the deploy started, so a connector the watch had just
+    /// added lost its trust and its requests got 403 (the release check of
+    /// 2026-11-28, on the WAF service's tunnel domain).
+    #[tokio::test]
+    async fn a_deploy_never_writes_the_tunnel_policy_without_a_connector() {
+        let _one = crate::tunnel::SERIAL.lock().await;
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let b = spec(vec![DomainSpec {
+            tunnel: pyo_proto::TUNNEL_ON.into(),
+            ..domain("shop.example.com", "http", "selfsigned", true)
+        }]);
+        // A new agent whose watch hasn't looked yet: the pods are there.
+        crate::tunnel::written_for_test(&[]);
+        connector_pod(&kube, "pyo-tunnel-a", "10.42.0.5");
+        apply(&client, &pyo, &b).await.expect("the routes");
+        assert_eq!(trusted_by(&kube, TUNNEL_POLICY), json!(["10.42.0.5/32"]));
+
+        // The watch writes (it holds the tunnel's lock) while the deploy
+        // runs: the deploy's write waits, then has the new connector.
+        crate::tunnel::written_for_test(&["10.42.0.5/32"]);
+        let watch = crate::tunnel::writing().await;
+        let deploy = tokio::spawn({
+            let (client, pyo, b) = (client.clone(), pyo.clone(), b.clone());
+            async move { apply(&client, &pyo, &b).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        connector_pod(&kube, "pyo-tunnel-b", "10.42.1.9");
+        crate::tunnel::written_for_test(&["10.42.0.5/32", "10.42.1.9/32"]);
+        drop(watch);
+        deploy.await.unwrap().expect("the routes");
+        assert_eq!(trusted_by(&kube, TUNNEL_POLICY), json!(["10.42.0.5/32", "10.42.1.9/32"]));
+
+        // A gone pod's address the watch still keeps (it finishes its
+        // requests): kept by a deploy too.
+        let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(client.clone(), "pyo-system");
+        pods.delete("pyo-tunnel-a", &DeleteParams::default()).await.unwrap();
+        apply(&client, &pyo, &b).await.expect("the routes");
+        assert_eq!(trusted_by(&kube, TUNNEL_POLICY), json!(["10.42.0.5/32", "10.42.1.9/32"]));
+        crate::tunnel::written_for_test(&[]);
+    }
+
+    /// The websites' settings rewrite the tunnel policies from what they
+    /// are when each is written, with every connector: never from a list
+    /// read before the watch added one.
+    #[tokio::test]
+    async fn the_websites_settings_keep_every_connector_in_the_tunnel_policy() {
+        let _one = crate::tunnel::SERIAL.lock().await;
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let b = spec(vec![DomainSpec {
+            tunnel: pyo_proto::TUNNEL_ON.into(),
+            ..domain("shop.example.com", "http", "selfsigned", true)
+        }]);
+        crate::tunnel::written_for_test(&[]);
+        connector_pod(&kube, "pyo-tunnel-a", "10.42.0.5");
+        apply(&client, &pyo, &b).await.expect("the routes");
+        // A connector the watch knows, not in the policy (a write from
+        // before it): the settings' write has it.
+        connector_pod(&kube, "pyo-tunnel-b", "10.42.1.9");
+        crate::tunnel::written_for_test(&["10.42.0.5/32", "10.42.1.9/32"]);
+        write_web(&client, system::WebSettings { tls13: true, ..Default::default() })
+            .await
+            .expect("the websites' settings");
+        let p = kube.get(TUNNEL_POLICY).unwrap();
+        assert_eq!(trusted_by(&kube, TUNNEL_POLICY), json!(["10.42.0.5/32", "10.42.1.9/32"]));
+        assert_eq!(p["spec"]["tls"]["minVersion"], "1.3", "{p}");
+        // Its listeners stay, and no origin pull on a tunnel's.
+        assert_eq!(p["spec"]["targetRefs"][0]["sectionName"], format!("h-{}", host_hash("shop.example.com")));
+        crate::tunnel::written_for_test(&[]);
+    }
+
+    /// A tunnel route's listeners (its hostnames' on a whole Gateway, or
+    /// the section it names), and which client policy covers them.
+    #[test]
+    fn tunnel_routes_name_the_listeners_a_policy_must_cover() {
+        let b = spec(vec![
+            DomainSpec {
+                tunnel: pyo_proto::TUNNEL_ON.into(),
+                ..domain("shop.example.com", "http", "selfsigned", true)
+            },
+            DomainSpec {
+                tunnel: pyo_proto::TUNNEL_SWITCHING.into(),
+                ..domain("next.example.com", "http", "selfsigned", false)
+            },
+            domain("direct.example.com", "http", "selfsigned", true),
+        ]);
+        let r = route_objects(&b);
+        let routes: Vec<DynamicObject> = r
+            .objects
+            .iter()
+            .filter(|o| o["kind"] == "HTTPRoute")
+            .map(|o| serde_json::from_value(o.clone()).unwrap())
+            .collect();
+        let listeners = tunnel_listeners_of(&routes);
+        let h = |host: &str| ("shop-web".to_owned(), format!("h-{}", host_hash(host)));
+        assert_eq!(listeners, {
+            let mut v = vec![h("shop.example.com"), h("next.example.com")];
+            v.sort();
+            v
+        });
+        let policy: DynamicObject =
+            serde_json::from_value(find(&r, "ClientTrafficPolicy", "shop-web-tunnel").clone()).unwrap();
+        for (gw, section) in &listeners {
+            assert!(policy_covers(&policy, gw, section), "{section}");
+        }
+        assert!(!policy_covers(&policy, "shop-web", &h("direct.example.com").1));
+        assert!(!policy_covers(&policy, "other", &h("shop.example.com").1));
+        // A path of a hostname another entry holds names its section.
+        let mut shared = routes[0].clone();
+        shared.data["spec"]["parentRefs"] = json!([{ "name": "shop-api", "sectionName": "h-1" }]);
+        shared.data["spec"]["rules"] = json!([system::tunnel_rule(json!({}))]);
+        assert_eq!(tunnel_listeners_of(&[shared]), [("shop-api".to_owned(), "h-1".to_owned())]);
     }
 
     #[test]

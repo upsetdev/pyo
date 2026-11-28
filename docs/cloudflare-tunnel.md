@@ -994,7 +994,13 @@ seconds, so its address must be trusted before cloudflared starts.
   phase `Succeeded` or `Failed` doesn't count: Kubernetes gives its
   address to another pod.
 - A new address is written into every tunnel client policy at once
-  (`gateway::set_tunnel_pods`).
+  (`gateway::set_tunnel_pods`). Each policy is written in this release's
+  form: its listeners and trusted ranges are kept, and the websites'
+  settings are as they are. A policy an older agent wrote is refused as
+  it is by this release's admission policy. During the update from 0.51.0
+  that refusal left a new connector untrusted on that policy. It also
+  marked the tunnel as refused, which stopped every repair, until the
+  service's routes were written again.
 - An address is removed only after its pod object is gone. A stopping
   pod still finishes requests. The removal goes out with the next new
   address, or 60 s after the last pod went. Each rewrite makes Envoy
@@ -1002,15 +1008,41 @@ seconds, so its address must be trusted before cloudflared starts.
   connectors costs about 3 rewrites.
 - A policy found without the connectors' addresses is rewritten, at most
   every 10 s.
+- The agent writes a tunnel policy in two other places: a service's
+  routes (`gateway::apply`) and the websites' settings
+  (`gateway::write_web`). Both hold the watch's lock (`tunnel::writing`)
+  for the write. Each reads every connector address right then
+  (`tunnel::connectors_now`): those the watch wrote, plus any connector
+  pod's that the watch hasn't seen yet. The websites' settings read the
+  policy again under the lock. No write ever leaves out a connector the
+  watch just added. Before 2026-11-28 both wrote the addresses as they
+  were when they started. A connector added in between lost its trust
+  until the next repair, and its requests got 403. The release check of
+  0.52.0-rc.1 saw 8 such 403s on the WAF service's tunnel domain during
+  the update from 0.51.0.
 
-**In effect.** An address counts as in effect when every tunnel client
-policy has it, Envoy Gateway's status on each policy (`Accepted`, on every
-ancestor) carries the policy's current `metadata.generation`, and 2 s
-have passed since the agent first saw that. The 2 s are for the proxies
-to take the new configuration. A policy Envoy Gateway refuses also counts
-as answered: waiting doesn't change it. With no tunnel policy at all
-(no tunnel domain yet) an address is in effect 2 s after the agent saw
-it.
+**In effect.** An address counts as in effect when:
+
+- every tunnel client policy has it,
+- every listener a tunnel route is on has a tunnel client policy. A
+  tunnel route is an HTTPRoute whose rule sets X-Forwarded-For to the
+  visitor (`system::tunnel_rule`). Its listeners are the section it names,
+  or its hostnames' `h-<hash>` sections. A listener without a policy
+  trusts no connector,
+- Envoy Gateway's status on each policy (`Accepted`, on every ancestor)
+  carries the policy's current `metadata.generation`,
+- and 2 s have passed since the agent first saw all that.
+
+The 2 s are for the proxies to take the new configuration. A policy
+Envoy Gateway refuses also counts as answered: waiting doesn't change it.
+With no tunnel route and no tunnel policy (no tunnel domain yet) an
+address is in effect 2 s after the agent saw it.
+
+The tunnel routes' SecurityPolicies (the behind gate, `source.port != 0`)
+hold no addresses. The gate refuses a request when its connection's
+address isn't trusted on its listener: then the proxy doesn't read
+X-Forwarded-For, and the address keeps its port. So the client policies
+on the listeners are what the gate waits for.
 
 **The gate** (`tunnel::gate`, `tunnel::serve_gate`). The connector's init
 container `tunnel-gate` runs `pyo-agent tunnel-gate` on an agent image,

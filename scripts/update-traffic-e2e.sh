@@ -72,7 +72,11 @@
 #         PYO_E2E_CF_TOKEN. Its VMs are zd-gw-1 and zd-gw-2.
 #
 # A watcher on the server logs every pod that starts, turns ready, stops
-# or goes away, so each failure is matched to the rollouts running then.
+# or goes away, with its addresses, so each failure is matched to the
+# rollouts running then. Another logs each change of the tunnel client
+# policies: their generation, what Envoy Gateway answered for, and the
+# addresses they trust (policies.log). At the end the agent's log and the
+# connectors' gate logs are kept too (agent.log, tunnel-gate.log).
 # The summary lists, per domain: requests sent, failed (by status), long
 # requests cut, WebSocket drops, and when each happened.
 #
@@ -759,6 +763,7 @@ start_watch() {
   vm "$VM1" mkdir -p /var/tmp/e2e
   send "$PY" /var/tmp/e2e/e2e.py
   vm "$VM1" systemd-run --quiet --unit e2e-watch --collect python3 /var/tmp/e2e/e2e.py watch /var/tmp/e2e/pods.log
+  vm "$VM1" systemd-run --quiet --unit e2e-watch-policies --collect python3 /var/tmp/e2e/e2e.py watch-policies /var/tmp/e2e/policies.log
   # The VM's clock against this machine's, for matching the two logs.
   local a b v
   a=$(date +%s.%N)
@@ -1433,8 +1438,13 @@ say "Stopping the traffic"
 touch "$DIR/stop"
 wait "$LOAD_PID" || true
 LOAD_PID=""
-vm "$VM1" systemctl stop e2e-watch || true
+vm "$VM1" systemctl stop e2e-watch e2e-watch-policies || true
 multipass transfer "$VM1:/var/tmp/e2e/pods.log" - >"$DIR/pods.log"
+multipass transfer "$VM1:/var/tmp/e2e/policies.log" - >"$DIR/policies.log" 2>/dev/null || true
+# What the agent and the connectors' gates said, for a failure on a
+# tunnel domain (the agent's since its last start).
+kc -n pyo-system logs deployment/pyo-agent --tail=-1 >"$DIR/agent.log" 2>&1 || true
+kc -n pyo-system logs -l app.kubernetes.io/name=pyo-tunnel -c tunnel-gate --tail=-1 --prefix >"$DIR/tunnel-gate.log" 2>&1 || true
 
 rc=0
 python3 "$PY" summary "$DIR" | tee "$DIR/summary.txt" || rc=$?
@@ -1455,6 +1465,9 @@ fi
 if [ -n "$OUT" ]; then
   mkdir -p "$OUT"
   cp "$DIR/load.log" "$DIR/pods.log" "$DIR/actions.log" "$DIR/targets" "$DIR/summary.txt" "$OUT/"
+  for f in policies.log agent.log tunnel-gate.log; do
+    [ ! -s "$DIR/$f" ] || cp "$DIR/$f" "$OUT/"
+  done
   [ "$MODE" != paths ] || cp "$DIR/paths.txt" "$DIR/probes.log" "$OUT/"
   [ ! -e "$DIR/probe-detail.log" ] || cp "$DIR/probe-detail.log" "$OUT/"
   [ "$MODE" != gateway ] || cp "$DIR/gateway.txt" "$OUT/"

@@ -4,6 +4,7 @@
   load LOG STOP RATE NAME=HOST@IP...   traffic, one line per result (HTTPS,
                                        or plain HTTP to HOST@IP:80)
   watch LOG                            pod changes on this server (k3s)
+  watch-policies LOG                   changes of the tunnel client policies
   summary DIR                          what failed, and during which rollout
   images-pull REGISTRY DIR TAG NAME... a build's images, from a registry
   images-push REGISTRY DIR             the same images, into a registry
@@ -278,16 +279,17 @@ def cmd_load(args):
 # ── watch ───────────────────────────────────────────────────────────────────
 
 # Its log: <epoch> <event> <namespace> <pod> <owner kind> <owner> <phase>
-# <ready> <deleting> <server>, and "<epoch> RESYNC" when the watch starts
-# again (k3s restarted): the pods are listed again after it.
+# <ready> <deleting> <server> <addresses>, and "<epoch> RESYNC" when the
+# watch starts again (k3s restarted): the pods are listed again after it.
 
 
-def cmd_watch(args):
-    out = open(args[0], "a", buffering=1)
+def watch_events(out, what):
+    """Each watch event of `kubectl get WHAT --watch`, again and again (the
+    watch ends when k3s restarts), with "<epoch> RESYNC" before each start."""
     while True:
         out.write(f"{time.time():.3f} RESYNC\n")
         p = subprocess.Popen(
-            os.environ.get("KUBECTL", "k3s kubectl").split() + ["get", "pods", "-A", "--watch", "--output-watch-events", "-o", "json"],
+            os.environ.get("KUBECTL", "k3s kubectl").split() + ["get"] + what + ["--watch", "--output-watch-events", "-o", "json"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -303,31 +305,69 @@ def cmd_watch(args):
             except ValueError:
                 continue
             buf = ""
-            if "object" not in ev:
-                continue
-            o = ev["object"]
-            meta, status = o.get("metadata", {}), o.get("status", {})
-            owner = (meta.get("ownerReferences") or [{}])[0]
-            ready = next((c.get("status") for c in status.get("conditions", []) if c.get("type") == "Ready"), "False")
-            out.write(
-                " ".join(
-                    [
-                        f"{time.time():.3f}",
-                        ev.get("type", "?"),
-                        meta.get("namespace", "-"),
-                        meta.get("name", "-"),
-                        owner.get("kind", "-"),
-                        owner.get("name", "-"),
-                        status.get("phase", "-"),
-                        "ready" if ready == "True" else "notready",
-                        "deleting" if meta.get("deletionTimestamp") else "-",
-                        o.get("spec", {}).get("nodeName") or "-",
-                    ]
-                )
-                + "\n"
-            )
+            if "object" in ev:
+                yield ev
         p.wait()
         time.sleep(1)
+
+
+def cmd_watch(args):
+    out = open(args[0], "a", buffering=1)
+    for ev in watch_events(out, ["pods", "-A"]):
+        o = ev["object"]
+        meta, status = o.get("metadata", {}), o.get("status", {})
+        owner = (meta.get("ownerReferences") or [{}])[0]
+        ready = next((c.get("status") for c in status.get("conditions", []) if c.get("type") == "Ready"), "False")
+        ips = ",".join(a.get("ip", "") for a in status.get("podIPs") or []) or "-"
+        out.write(
+            " ".join(
+                [
+                    f"{time.time():.3f}",
+                    ev.get("type", "?"),
+                    meta.get("namespace", "-"),
+                    meta.get("name", "-"),
+                    owner.get("kind", "-"),
+                    owner.get("name", "-"),
+                    status.get("phase", "-"),
+                    "ready" if ready == "True" else "notready",
+                    "deleting" if meta.get("deletionTimestamp") else "-",
+                    o.get("spec", {}).get("nodeName") or "-",
+                    ips,
+                ]
+            )
+            + "\n"
+        )
+
+
+# Its log: <epoch> <event> <policy> <generation> <answered> <trusted>, for
+# each tunnel client policy in pyo-gateway. <answered> is the generation
+# Envoy Gateway last answered for on each Gateway (comma separated),
+# <trusted> the addresses its listeners trust.
+
+
+def cmd_watch_policies(args):
+    out = open(args[0], "a", buffering=1)
+    for ev in watch_events(out, ["clienttrafficpolicies", "-n", "pyo-gateway", "-l", "pyo.dev/cdn=tunnel"]):
+        o = ev["object"]
+        meta = o.get("metadata", {})
+        answered = []
+        for a in (o.get("status") or {}).get("ancestors") or []:
+            g = next((c.get("observedGeneration") for c in a.get("conditions") or [] if c.get("type") == "Accepted"), None)
+            answered.append(str(g) if g is not None else "-")
+        trusted = (((o.get("spec") or {}).get("clientIPDetection") or {}).get("xForwardedFor") or {}).get("trustedCIDRs") or []
+        out.write(
+            " ".join(
+                [
+                    f"{time.time():.3f}",
+                    ev.get("type", "?"),
+                    meta.get("name", "-"),
+                    str(meta.get("generation", "-")),
+                    ",".join(answered) or "-",
+                    ",".join(trusted) or "-",
+                ]
+            )
+            + "\n"
+        )
 
 
 # ── summary ─────────────────────────────────────────────────────────────────
@@ -762,6 +802,7 @@ COMMANDS = {
     "h3": cmd_h3,
     "load": cmd_load,
     "watch": cmd_watch,
+    "watch-policies": cmd_watch_policies,
     "summary": cmd_summary,
     "images-pull": cmd_images_pull,
     "images-push": cmd_images_push,
