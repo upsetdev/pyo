@@ -116,9 +116,21 @@ fn kept() -> std::sync::MutexGuard<'static, Kept> {
     KEPT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The connectors' pod addresses, as the tunnel policies trust them.
+/// The connectors' pod addresses, as the watch wrote them into the tunnel
+/// policies. Writers elsewhere use [`connectors_now`].
+#[cfg(test)]
 pub fn trusted_now() -> Vec<String> {
     kept().pods.clone()
+}
+
+/// For tests elsewhere: the watch has written these addresses, and
+/// nothing else is kept.
+#[cfg(test)]
+pub fn written_for_test(pods: &[&str]) {
+    *kept() = Kept {
+        pods: pods.iter().map(|p| p.to_string()).collect(),
+        ..Kept::default()
+    };
 }
 
 /// The install refused a tunnel object: said once, and reported.
@@ -527,8 +539,39 @@ fn next_look(k: &Kept) -> Duration {
     }
 }
 
-/// One look at a time.
+/// One look at a time, and no other write of a tunnel policy meanwhile
+/// ([`writing`]).
 static FOLLOWING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Wakes the watch for a look (a tunnel policy was written elsewhere).
+static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Held by anything else that writes a tunnel policy (a deploy, the
+/// websites' settings): the watch doesn't look or write meanwhile. With
+/// [`connectors_now`] read while it's held, such a write never takes out
+/// an address the watch has just put in, which a connector may already
+/// serve with (the release check of 2026-11-28 saw 403s from that).
+pub async fn writing() -> tokio::sync::MutexGuard<'static, ()> {
+    FOLLOWING.lock().await
+}
+
+/// Every connector address a tunnel policy must trust right now: those
+/// the watch wrote (gone pods' too, until they're due) and any pod's the
+/// watch hasn't seen yet (it may connect before the watch looks). Read
+/// while [`writing`] is held.
+pub async fn connectors_now(client: &Client) -> kube::Result<Vec<String>> {
+    let live = pod_cidrs(&pods(client).list(&selector()).await?.items);
+    let mut all = kept().pods.clone();
+    all.extend(live);
+    all.sort();
+    all.dedup();
+    Ok(all)
+}
+
+/// A tunnel policy was written elsewhere: the watch looks again soon, for
+/// what's in effect.
+pub fn look_again() {
+    WAKE.notify_one();
+}
 
 /// One look at the connectors' pods: the tunnel policies trust the new
 /// ones at once and drop the gone ones late, and what's in effect is
@@ -564,15 +607,21 @@ async fn follow_pods(client: &Client) -> anyhow::Result<Duration> {
     if written.is_empty() {
         return Ok(next_look(&kept()));
     }
-    // Every policy has them, and the gateway's controller has answered:
-    // in effect once the proxies had their time. A policy without them (a
-    // deploy wrote it with the addresses as they were): put back.
+    // Every policy has them, every listener a tunnel route is on has a
+    // policy, and the gateway's controller has answered: in effect once
+    // the proxies had their time. A policy without them (an older agent
+    // wrote it): put back. A listener without one trusts no connector:
+    // its service's next routes write brings it.
     let policies = crate::gateway::tunnel_policies(client).await?;
+    let listeners = crate::gateway::tunnel_listeners(client).await?;
     let lacking = policies.iter().any(|p| !policy_trusts(p, &written));
-    let taken = !lacking && policies.iter().all(policy_taken);
+    let uncovered = listeners
+        .iter()
+        .any(|(gw, section)| !policies.iter().any(|p| crate::gateway::policy_covers(p, gw, section)));
+    let taken = !lacking && !uncovered && policies.iter().all(policy_taken);
     let repair = {
         let mut k = kept();
-        if lacking {
+        if lacking || uncovered {
             k.in_effect.clear();
         }
         if taken {
@@ -622,6 +671,7 @@ pub async fn run(agent: crate::Agent) {
         };
         let change = tokio::select! {
             change = changes.next() => change,
+            _ = WAKE.notified() => continue,
             _ = tokio::time::sleep(wait) => continue,
         };
         if let Some(Err(e)) = &change {
@@ -1503,6 +1553,85 @@ mod tests {
         assert_eq!(gate_answer(Some("ip=10.42.0.5")), "no");
         kept().taken_at = Some(ago(SETTLE));
         assert_eq!(follow_pods(&client).await.unwrap(), RESYNC);
+        assert_eq!(gate_answer(Some("ip=10.42.0.5")), "yes");
+    }
+
+    /// A tunnel policy as an older agent wrote it, which this release's
+    /// admission policy refuses as it is (the update from 0.51.0): the
+    /// watch writes it in this release's form, so a new connector is
+    /// trusted at once, its listeners stay, and the tunnel isn't taken
+    /// for refused (which would stop every repair).
+    #[tokio::test]
+    async fn a_policy_an_older_agent_wrote_still_gets_a_new_connector() {
+        let _one = SERIAL.lock().await;
+        let (kube, client) = FakeKube::start().await;
+        reset();
+        let mut old = tunnel_policy(&["10.42.0.5/32"], 1, 1);
+        old["spec"]["targetRefs"] = json!([{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "shop-web", "sectionName": "h-1" }]);
+        kube.put(POLICY, old);
+        // Only this release's form gets through (it removes visitor headers).
+        kube.admit(|w| {
+            (w.plural == "clienttrafficpolicies" && w.body["spec"].get("headers").is_none())
+                .then(|| (422, "Pyo's agent only writes its own objects, with exactly the content this release defines.".into()))
+        });
+        kube.put(&pod_path("pyo-tunnel-a"), tunnel_pod("10.42.0.5"));
+        kube.put(&pod_path("pyo-tunnel-b"), tunnel_pod("10.42.1.9"));
+        follow_pods(&client).await.unwrap();
+        assert_eq!(trusted_in(&kube), ["10.42.0.5/32", "10.42.1.9/32"]);
+        assert!(kube.refused().is_empty(), "{:?}", kube.refused());
+        assert!(!REFUSED_NOW.load(Ordering::Relaxed));
+        let p = kube.get(POLICY).unwrap();
+        assert_eq!(p["spec"]["targetRefs"][0]["sectionName"], "h-1");
+        assert_eq!(p["spec"]["targetRefs"][0]["name"], "shop-web");
+        assert!(p["spec"]["tls"].get("clientValidation").is_none(), "{p}");
+    }
+
+    /// A tunnel route on a listener no tunnel policy covers: that listener
+    /// trusts no connector, so nothing is in effect until a policy covers
+    /// it. Then the gate opens as usual.
+    #[tokio::test]
+    async fn the_gate_waits_for_every_tunnel_listener_to_have_its_policy() {
+        let _one = SERIAL.lock().await;
+        let (kube, client) = FakeKube::start().await;
+        reset();
+        let section = format!("h-{}", crate::gateway::host_hash("shop.example.com"));
+        kube.put(
+            "apis/gateway.networking.k8s.io/v1/namespaces/pyo-gateway/httproutes/shop-web-tunnel-http",
+            json!({
+                "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+                "spec": { "parentRefs": [{ "name": "shop-web" }], "hostnames": ["shop.example.com"],
+                          "rules": [system::tunnel_rule(json!({ "backendRefs": [] }))] },
+            }),
+        );
+        // Another service's route, not through the tunnel: no policy needed.
+        kube.put(
+            "apis/gateway.networking.k8s.io/v1/namespaces/pyo-gateway/httproutes/shop-api-https-http",
+            json!({
+                "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+                "spec": { "parentRefs": [{ "name": "shop-api" }], "hostnames": ["api.example.com"], "rules": [{ "backendRefs": [] }] },
+            }),
+        );
+        kube.put(&pod_path("pyo-tunnel-a"), tunnel_pod("10.42.0.5"));
+        // No policy for the route's listener yet.
+        follow_pods(&client).await.unwrap();
+        kept().taken_at = Some(ago(SETTLE));
+        follow_pods(&client).await.unwrap();
+        assert_eq!(gate_answer(Some("ip=10.42.0.5")), "no");
+        // One that covers another listener only.
+        let mut other = tunnel_policy(&["10.42.0.5/32"], 2, 2);
+        other["spec"]["targetRefs"] = json!([{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "shop-web", "sectionName": "h-00000000" }]);
+        kube.put(POLICY, other.clone());
+        follow_pods(&client).await.unwrap();
+        kept().taken_at = Some(ago(SETTLE));
+        follow_pods(&client).await.unwrap();
+        assert_eq!(gate_answer(Some("ip=10.42.0.5")), "no");
+        // Its policy is there: in effect after the proxies' time.
+        other["spec"]["targetRefs"][0]["sectionName"] = json!(section);
+        kube.put(POLICY, other);
+        follow_pods(&client).await.unwrap();
+        assert_eq!(gate_answer(Some("ip=10.42.0.5")), "no");
+        kept().taken_at = Some(ago(SETTLE));
+        follow_pods(&client).await.unwrap();
         assert_eq!(gate_answer(Some("ip=10.42.0.5")), "yes");
     }
 

@@ -331,7 +331,7 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
     return "Websites through Cloudflare. No open ports needed.";
   })();
   const tailnetHint = !tailscale ? (
-    "Connect Tailscale on Integrations first."
+    "Connect Tailscale first."
   ) : (
     <>
       Websites on ts.net names, for devices on your tailnet.
@@ -378,7 +378,10 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
       <PathRow
         label={LABEL.tailnet}
         hint={tailnetHint}
-        on={paths.tailnet}
+        // Off until the team connects Tailscale, whatever the stored value
+        // (on by default). The one-path check above keeps the stored value,
+        // as the API counts it.
+        on={tailscale && paths.tailnet}
         disabled={!admin || !tailscale}
         onChange={(on) => toggle("tailnet", on)}
       >
