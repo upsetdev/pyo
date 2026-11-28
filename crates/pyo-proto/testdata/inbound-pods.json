@@ -207,7 +207,7 @@
           "pyo.dev/token-hash": "<token hash>",
           "pyo.dev/tunnel-config": "09de69bcbe093feb",
           "pyo.dev/tunnel-gate-version": "1",
-          "pyo.dev/tunnel-template": "ee611470e1c58c4e"
+          "pyo.dev/tunnel-template": "58d35f18f6417b14"
         },
         "labels": {
           "app.kubernetes.io/name": "pyo-tunnel"
