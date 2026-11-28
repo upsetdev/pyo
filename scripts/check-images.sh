@@ -24,6 +24,13 @@ MIRROR=ghcr.io/upsetdev/pyo-mirror
 # the API's examples of such a service. None picks an image Pyo runs.
 USER_IMAGES='^crates/(pyo-api/src/registry\.rs|pyo-agent/src/rollout\.rs|pyo-sandbox/src/oci\.rs|pyo-api/src/openapi\.rs):'
 
+# References Pyo writes but never pulls, kept as an older release had them
+# so an update doesn't restart what runs. Each is matched by its exact
+# line. CHART_SHUTDOWN_MANAGER_IMAGE: the gateway chart's shutdown
+# manager, as 0.51.0's chart rendered it. The proxies run the image
+# their EnvoyProxy names (ENVOY_GATEWAY_IMAGE, from the mirror).
+NEVER_PULLED='^crates/pyo-proto/src/system\.rs:[0-9]+: pub const CHART_SHUTDOWN_MANAGER_IMAGE: &str = "docker\.io/envoyproxy/gateway:v1\.9\.3";$'
+
 problems=()
 problem() { problems+=("$1"); }
 
@@ -59,6 +66,7 @@ mapfile -t RUST < <(git ls-files 'crates/*/src/*.rs' 'crates/*/src/**/*.rs' \
   | grep -vE '/tests?/|/tests?\.rs$|_tests?\.rs$|/e2e\.rs$|/fake[a-z]*\.rs$')
 REF='"(([a-z0-9.-]+(:[0-9]+)?/)?[a-z0-9._-]+(/[a-z0-9._-]+)*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?)"'
 while IFS= read -r line; do
+  [[ "$line" =~ $NEVER_PULLED ]] && continue
   where=${line%%: *}
   text=${line#*: }
   rest=$text
