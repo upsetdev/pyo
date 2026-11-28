@@ -1,5 +1,5 @@
 {
-  "version": "0.52.0-rc.1",
+  "version": "0.52.0",
   "minFrom": null,
   "manualOnly": true,
   "beforeYouUpdate": [
@@ -11,6 +11,7 @@
     "The Cloudflare Tunnel connector restarts once on each cluster that uses it.",
     "The firewall restarts once on each server where a service uses it.",
     "Each service's open WebSockets and streams drop once, the next time Pyo applies its routes.",
+    "Country rules on domains behind Cloudflare or through Cloudflare Tunnel use the country Cloudflare sends. Keep Cloudflare's IP geolocation on. If it's off, \"is not in\" rules there block everyone.",
     "Self-hosted sandbox servers stop taking commands after this update until an admin presses Update on each one and runs the command it shows on that server. Their sandboxes keep running."
   ]
 }
