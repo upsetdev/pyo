@@ -875,6 +875,7 @@ probe_start() {
   (
     for fd in 3 4 5 6 7 8 9; do eval "exec $fd>&-"; done
     while [ ! -e "$DIR/probe-stop" ]; do
+      rm -f "$DIR/probe-h" "$DIR/probe-b"
       d=$(curl -ks -D "$DIR/probe-h" -o "$DIR/probe-b" -w '%{http_code}' -m 2 --resolve "$MV_HOST:443:$IP1" "https://$MV_HOST/" || true)
       # Who answered when it wasn't the service: Envoy's own 404 has no
       # body and server: envoy.
