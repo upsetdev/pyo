@@ -231,7 +231,7 @@ version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ];
 # the script travels as its functions plus the settings it sets outside them
 # (SETTINGS, which CI checks against the script). sudo clears the
 # environment, so every PYO_* variable goes along too.
-SETTINGS="K3S_UNIT K3S_MEMORY_CONFIG K3S_MEMORY_CHANGED K3S_TAILNET_CONFIG COSIGN_VERSION COSIGN_SHA256_AMD64 RELEASE_SIGNER RELEASE_ISSUER"
+SETTINGS="K3S_UNIT K3S_MEMORY_CONFIG K3S_MEMORY_CHANGED K3S_TAILNET_CONFIG COSIGN_VERSION COSIGN_SHA256_AMD64 RELEASE_SIGNER RELEASE_ISSUER RELEASE_COPIES"
 become_root() {
   [ "$(id -u)" = 0 ] && return 0
   command -v sudo >/dev/null || fail "Run this as root (there's no sudo)."
