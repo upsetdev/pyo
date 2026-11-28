@@ -29,7 +29,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use pyo_proto::{parse_version, pinned_image};
+use pyo_proto::{pinned_image, version_newer};
 use serde_json::{Value, json};
 
 use super::images::Images;
@@ -195,7 +195,8 @@ pub enum Seed {
 }
 
 /// Forward only: a newer Pyo's choice stays (an older Pyo still runs
-/// during an update), and so does a newer build of the images.
+/// during an update), and so does a newer build of the images. A release
+/// candidate's choice compares as its release's does.
 pub fn decide(have: Option<&Value>, want: &Wanted) -> Seed {
     let Some(src) = have else {
         return Seed::Insert;
@@ -203,9 +204,9 @@ pub fn decide(have: Option<&Value>, want: &Wanted) -> Seed {
     if src["image"].as_str() == Some(want.image.as_str()) {
         return Seed::Keep;
     }
-    let theirs = src["release"].as_str().and_then(parse_version);
-    if let (Some(a), Some(b)) = (theirs, parse_version(&want.release))
-        && a > b
+    if src["release"]
+        .as_str()
+        .is_some_and(|theirs| version_newer(theirs, &want.release))
     {
         return Seed::Keep;
     }
@@ -400,6 +401,32 @@ mod tests {
             ),
             Seed::Move
         );
+    }
+
+    /// A release candidate decides as its release does: it leaves a newer
+    /// Pyo's choice and moves an older one's. Its release moves its choice.
+    #[test]
+    fn a_release_candidate_moves_it_as_its_release_does() {
+        for theirs in ["0.51.0", "0.52.1", "99.0.1", ""] {
+            let have = if theirs.is_empty() {
+                json!({ "kind": "image", "image": A })
+            } else {
+                source(&want(A, theirs))
+            };
+            assert_eq!(
+                decide(Some(&have), &want(B, "0.52.0-rc.1")),
+                decide(Some(&have), &want(B, "0.52.0")),
+                "{theirs}"
+            );
+        }
+        assert_eq!(decide(Some(&source(&want(A, "99.0.1"))), &want(B, "0.52.0-rc.1")), Seed::Keep);
+        assert_eq!(decide(Some(&source(&want(A, "0.51.0"))), &want(B, "0.52.0-rc.1")), Seed::Move);
+        // The release after its candidate moves it, and the candidate,
+        // still running during that update, leaves the release's.
+        let rc = want(A, "0.52.0-rc.1");
+        let release = want(B, "0.52.0");
+        assert_eq!(decide(Some(&source(&rc)), &release), Seed::Move);
+        assert_eq!(decide(Some(&source(&release)), &rc), Seed::Keep);
     }
 
     #[test]
