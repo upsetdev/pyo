@@ -116,11 +116,24 @@
 # Nothing the zone had before the test is touched. It prints whether the
 # zone is as before.
 #
+# Run it with a hard limit, for example:
+#   flock -o ~/.heavy-job.lock timeout --kill-after=60s 90m scripts/update-traffic-e2e.sh ...
+# On TERM it stops waiting for whatever runs, ends multipass clients that
+# hang (only a process inside multipass's snap may signal them), and
+# cleans up. It holds no file it was started with open, so a lock taken
+# for it is gone when it is.
+#
 # The VMs are deleted when it ends, however it ends. It refuses to start
 # when a VM of those names exists, and never touches any other VM. Needs
 # multipass, python3, curl and jq, and 3 GB of free memory for the first
 # VM plus 2 GB for the second.
 set -euo pipefail
+# No file descriptor of whoever started it (a lock's) stays open in the
+# multipass clients it starts: one that hangs would hold the lock.
+for fd in /proc/$$/fd/*; do
+  fd=${fd##*/}
+  [ "$fd" -gt 2 ] && [ "$fd" != 255 ] && eval "exec $fd>&-" 2>/dev/null || true
+done
 cd "$(dirname "$0")/.."
 PY=scripts/update-traffic-e2e.py
 RELEASES=https://github.com/upsetdev/pyo/releases/download
@@ -206,6 +219,9 @@ cleanup() {
     touch "$DIR/probe-stop"
     kill "$PROBE_PID" 2>/dev/null || true
   fi
+  # multipass clients still running (one that hung on TERM): snap
+  # confinement lets only a process inside the snap signal them.
+  end_clients
   # Before the VMs go: Pyo's own remove actions need them.
   [ -z "$CF_USED" ] || cf_cleanup
   [ -z "$PULLED" ] || docker rmi "$PULLED" >/dev/null 2>&1 || true
@@ -227,6 +243,21 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ── The VMs ─────────────────────────────────────────────────────────────────
+
+# end_clients: ends this run's multipass clients that are still running.
+end_clients() {
+  local p
+  for p in $(pgrep -f "multipass (exec|transfer) ($VM1|$VM2)( |:)" 2>/dev/null); do
+    snap run --shell multipass -c "kill $p" 2>/dev/null || kill "$p" 2>/dev/null || true
+  done
+}
+# bounded COMMAND...: runs it in the background and waits, so TERM (the
+# hard limit) is handled at once instead of after a command that hangs.
+bounded() {
+  "$@" &
+  local pid=$!
+  wait "$pid"
+}
 
 vm() {
   local n=$1
@@ -1312,8 +1343,11 @@ run_update() {
   vm "$VM1" systemd-run --quiet --unit e2e-release --collect --working-directory /var/tmp/e2e/release \
     python3 -m http.server 8765 --bind 127.0.0.1
   # This branch's install.sh, whole. The dev build isn't signed, so the
-  # signature check alone is left out.
-  multipass exec "$VM1" -- sudo bash -s -- "$TO" <<'SH' 2>&1 | indent || rc=$?
+  # signature check alone is left out. Its output goes to a file on the
+  # VM, not back through multipass: a process it starts that keeps the
+  # output open kept multipass exec from ever ending (2026-11-28), and
+  # the run with it, past its hard limit. 30 minutes at most.
+  vm "$VM1" tee /var/tmp/e2e/update.sh >/dev/null <<'SH'
 set -euo pipefail
 sleep 2
 source <(sed '$d' /var/tmp/e2e/release/install.sh)
@@ -1321,6 +1355,8 @@ verify_release() { say "Not checking the signature: this is a test build"; }
 export PYO_UPDATE_SOURCE=http://127.0.0.1:8765 PYO_TELEMETRY=off
 main --version "$1" --yes </dev/null
 SH
+  bounded multipass exec "$VM1" -- sudo sh -c 'timeout --kill-after=30s 30m bash /var/tmp/e2e/update.sh "$1" >/var/tmp/e2e/update.log 2>&1 </dev/null' sh "$TO" || rc=$?
+  vm "$VM1" cat /var/tmp/e2e/update.log | indent || true
   vm "$VM1" systemctl stop e2e-release || true
   [ "$rc" = 0 ] || return 1
   note "install.sh is done. Waiting until every rollout is over."
