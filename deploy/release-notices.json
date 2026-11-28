@@ -11,7 +11,6 @@
     "The Cloudflare Tunnel connector restarts once on each cluster that uses it.",
     "The firewall restarts once on each server where a service uses it.",
     "Each service's open WebSockets and streams drop once, the next time Pyo applies its routes.",
-    "Self-hosted sandbox servers stop taking commands after this update until an admin presses Update on each one and runs the command it shows on that server. Their sandboxes keep running.",
-    "Node.js services without a pinned Node.js version build on Node.js 26 from their next deploy."
+    "Self-hosted sandbox servers stop taking commands after this update until an admin presses Update on each one and runs the command it shows on that server. Their sandboxes keep running."
   ]
 }
